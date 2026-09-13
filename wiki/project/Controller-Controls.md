@@ -347,6 +347,35 @@ It acknowledges restored safety, not successful execution of the failed test.
 
 ## Verification boundary
 
+### Paired-trial adapter pilot
+
+`lich/lab-paired-trial.rb` is an opt-in adapter for a separately reviewed native
+EOHunter GroupTrial runner. It registers no capabilities by default and is not
+an arbitrary-script launcher. A local manifest and reviewed runner are still
+required; neither private character profiles nor test destinations ship here.
+
+The adapter reuses EOHunter's `Controller::Guard` and immutable projections.
+LAB binds the exact runtime and supplies its existing cached operation lease.
+Control callbacks enqueue intent only; the owner calls `poll` outside disposable
+combat guards and hands return requests to the native participant. Ordinary
+stop/retreat preserves bounded return authority. Revocation or a changed session
+does not permit further commands. Hold/resume are not supported by this pilot.
+
+The runner must call `finish` after native work/child cleanup and publish the
+returned immutable status as its exact instance's `controller_result`. Successful
+combat requires both pinned native receipts and fresh local refuge/equipment
+evidence. A lost peer can produce a failed test with verified local recovery;
+it cannot produce a successful pair result. Missing final observation produces
+an unsafe handoff, not an inferred return. Native policy still owns targeting,
+movement, equipment and recovery; the adapter sends no game commands.
+
+Run the adapter tests with `LAB_TEST_HUNTER_ROOT=/path/to/reviewed/hunter ruby
+tests/lab_paired_trial_test.rb`. They use Hunter's actual Guard/Immutable plus
+LAB's Binding/Lease with synthetic observations. Without that checkout they
+explicitly skip. They do not establish live game or paired transport behavior.
+
+### Existing controller coverage
+
 Tests use the production schemas, ActionBroker, CapabilityRunner, Ruby bridge
 launch/dispatch/monitor and lease adapter, plus authenticated HTTP/CLI transport,
 with synthetic state, authority, child lifecycle, and runtime observations. They cover
