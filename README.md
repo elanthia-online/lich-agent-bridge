@@ -150,9 +150,17 @@ For a retained failed controlled-outing handoff, `;lab recover` lists the exact 
 After restoring the character, `;lab recover RUN_ID confirm` verifies refuge,
 original equipment and released ownership before acknowledging that one run.
 It sends no game commands and does not turn the failed test into a pass.
+An agent acting on the player's explicit instruction can perform the same narrow
+operation through `session.recover_controller` with the exact run ID,
+`confirm: true`, and the current expected session generation. The owning Lich
+session repeats the native checks and publishes matching recovery evidence;
+guarded mode exposes no general remote script-command capability.
+If the sidecar restarted and lost its in-memory pending tuple, the retained
+native run remains authoritative: its authenticated exact-ID receipt supplies
+the controller, prior generation, refuge and original hands for the same checks.
 See [recovery checks](wiki/project/Controller-Controls.md#player-confirmed-recovery-after-a-lab-restart).
 
-The default catalog contains five capabilities:
+The default catalog contains six capabilities:
 
 - `character.recon`: fixed INFO/SKILLS inspection with verified observations.
 - `travel.go2`: exact-room native go2 travel with bounded execution and verified
@@ -161,6 +169,8 @@ The default catalog contains five capabilities:
 - `room.loot`: a bounded ELoot sweep with admission and outcome checks.
 - `hunt.prepare`: unavailable without a configured character profile; no profiles
   are bundled.
+- `session.recover_controller`: acknowledge one exact retained controller handoff
+  after explicit operator confirmation and verified native recovery state.
 
 The controller manifest is empty. Retrieve the live catalog and its schemas
 instead of hard-coding availability:

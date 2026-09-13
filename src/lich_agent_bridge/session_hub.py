@@ -180,18 +180,32 @@ class WorldStateEvidenceAdapter:
         No receipt means no cross-generation recovery; expired ring entries must
         be explicitly republished by the player, not inferred from current safety.
         """
+        receipt = self.controller_recovery_receipt(
+            character=character, generation=generation, action_id=action_id
+        )
+        return bool(
+            receipt
+            and receipt.get("controller") == controller
+            and receipt.get("previous_generation") == previous_generation
+            and receipt.get("operator_confirmed") is True
+            and receipt.get("room_id") == room_id
+            and receipt.get("hands") == {"left": hands[0], "right": hands[1]}
+        )
+
+    def controller_recovery_receipt(self, *, character, generation, action_id):
+        """Return the newest exact native recovery receipt, if still retained."""
+
         page = self._world_state.watch(character, cursor=0, timeout=0)
-        for event in page["events"]:
+        for event in reversed(page["events"]):
             data = event.get("data")
-            if (event.get("kind") != "controller_recovery" or event.get("generation") != generation
-                    or not isinstance(data, Mapping)):
-                continue
-            if (data.get("controller") == controller and data.get("action_id") == action_id
-                    and data.get("previous_generation") == previous_generation
-                    and data.get("operator_confirmed") is True and data.get("room_id") == room_id
-                    and data.get("hands") == {"left": hands[0], "right": hands[1]}):
-                return True
-        return False
+            if (
+                event.get("kind") == "controller_recovery"
+                and event.get("generation") == generation
+                and isinstance(data, Mapping)
+                and data.get("action_id") == action_id
+            ):
+                return dict(data)
+        return None
 
     def verify_controller(
         self,

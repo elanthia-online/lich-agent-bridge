@@ -113,6 +113,7 @@ module LichAgentBridge
     /\Aeherbs heal\z/i,
     /\Abigshot (?:start|stop)\z/i,
     /\Aebounty (?:start|stop)\z/i,
+    /\Alab recover [0-9a-f]{16} confirm\z/i,
     *CONTROLLER_REGISTRY.safe_patterns,
     /\Abeseech teleport\z/i,
     /\A(?:flag|stow set|store set) [^\r\n]{1,130}\z/i,
@@ -1944,51 +1945,61 @@ module LichAgentBridge
     end
   end
 
-  # Local player acknowledgement, deliberately absent from broker capabilities.
   # Retain the original run/result for audit and receipt retry until superseded.
   # No movement, equipment commands, child cancellation or authority renewal.
   def self.recover_controlled_handoff(action_id = nil, confirm: false)
     @execution_mutex.synchronize do
-      runs = @controlled_run_mutex.synchronize { @controlled_runs.values.dup }
-      if action_id.nil?
-        pending = runs.select { |run| run[:unsafe_handoff] && run[:action][:character].to_s.casecmp?(character_name) }
-        display('no unresolved native controller handoffs') if pending.empty?
-        pending.each do |run|
-          display("unresolved controller #{run[:action][:action_id]}: refuge #{run[:controller].safe_handoff['room_id']}; after restoring equipment, use ;lab recover #{run[:action][:action_id]} confirm")
-        end
-        return
-      end
-      raise ArgumentError, 'use ;lab recover RUN_ID confirm' unless confirm == true && action_id.match?(/\A[0-9a-f]{16}\z/)
-      run = runs.find { |candidate| candidate[:action][:action_id] == action_id }
-      raise ArgumentError, 'no matching unresolved or acknowledged controller run' unless run && (run[:unsafe_handoff] || run[:operator_recovered])
-      raise ArgumentError, 'recovery requires a supervised refuge run' unless controlled_refuge_handoff?(run[:controller])
-      raise ArgumentError, 'owned controller child or monitor has not exited' unless run[:instance]&.join(0) && run[:monitor]&.join(0)
-      generation = session_generation
-      hands = controlled_refuge_hands(run, expected_generation: generation)
-      unless hands && hands == run[:start_hands] && script_owners(live_scripts).values.compact.empty?
-        raise ArgumentError, 'recovery requires the same character, configured refuge, standing survival, original hands and released owners'
-      end
-      publish_snapshot(force: true)
-      # A replacement LAB instance must not confirm a check begun by this one.
-      raise ArgumentError, 'session changed during recovery' unless generation == session_generation
-      receipt = { controller: run[:controller].name, action_id: action_id,
-                  previous_generation: run[:action][:generation], operator_confirmed: true,
-                  room_id: run[:controller].safe_handoff['room_id'].to_s, hands: hands }
-      unless publish_event('controller_recovery', 'Player verified safe recovery; original test result unchanged', receipt)
-        raise ArgumentError, 'recovery receipt was not acknowledged; lock retained, retry the same command'
-      end
-      unless controlled_refuge_restored?(run, expected_generation: generation)
-        raise ArgumentError, 'handoff changed during acknowledgement; lock retained'
-      end
-      @controlled_run_mutex.synchronize do
-        raise ArgumentError, 'run or session changed during recovery' unless @controlled_runs[run[:controller].name].equal?(run) && generation == session_generation
-        run[:unsafe_handoff] = false
-        run[:operator_recovered] = true
-      end
-      display("recovery acknowledged for #{action_id}; original test remains failed. LAB rechecks current state before another test.")
+      recover_controlled_handoff_locked(action_id, confirm: confirm)
     end
+    true
   rescue StandardError => error
     display("recovery refused: #{error.message}")
+    false
+  end
+
+  # The public command and broker action share one verifier. Broker execution
+  # already owns @execution_mutex, so this inner method must not acquire it.
+  def self.recover_controlled_handoff_locked(action_id = nil, confirm: false)
+    runs = @controlled_run_mutex.synchronize { @controlled_runs.values.dup }
+    if action_id.nil?
+      pending = runs.select { |run| run[:unsafe_handoff] && run[:action][:character].to_s.casecmp?(character_name) }
+      display('no unresolved native controller handoffs') if pending.empty?
+      pending.each do |run|
+        display("unresolved controller #{run[:action][:action_id]}: refuge #{run[:controller].safe_handoff['room_id']}; after restoring equipment, use ;lab recover #{run[:action][:action_id]} confirm")
+      end
+      return false
+    end
+    raise ArgumentError, 'use ;lab recover RUN_ID confirm' unless confirm == true && action_id.match?(/\A[0-9a-f]{16}\z/)
+    run = runs.find { |candidate| candidate[:action][:action_id] == action_id }
+    raise ArgumentError, 'no matching unresolved or acknowledged controller run' unless run && (run[:unsafe_handoff] || run[:operator_recovered])
+    raise ArgumentError, 'recovery requires a supervised refuge run' unless controlled_refuge_handoff?(run[:controller])
+    raise ArgumentError, 'owned controller child or monitor has not exited' unless run[:instance]&.join(0) && run[:monitor]&.join(0)
+    generation = session_generation
+    hands = controlled_refuge_hands(run, expected_generation: generation)
+    unless hands && hands == run[:start_hands] && script_owners(live_scripts).values.compact.empty?
+      raise ArgumentError, 'recovery requires the same character, configured refuge, standing survival, original hands and released owners'
+    end
+    publish_snapshot(force: true)
+    # A replacement LAB instance must not confirm a check begun by this one.
+    raise ArgumentError, 'session changed during recovery' unless generation == session_generation
+    receipt = { controller: run[:controller].name, action_id: action_id,
+                previous_generation: run[:action][:generation], operator_confirmed: true,
+                room_id: run[:controller].safe_handoff['room_id'].to_s, hands: hands }
+    unless publish_event('controller_recovery', 'Operator verified safe recovery; original test result unchanged', receipt)
+      raise ArgumentError, 'recovery receipt was not acknowledged; lock retained, retry the same command'
+    end
+    unless controlled_refuge_restored?(run, expected_generation: generation)
+      raise ArgumentError, 'handoff changed during acknowledgement; lock retained'
+    end
+    @controlled_run_mutex.synchronize do
+      raise ArgumentError, 'run or session changed during recovery' unless @controlled_runs[run[:controller].name].equal?(run) && generation == session_generation
+      run[:unsafe_handoff] = false
+      run[:operator_recovered] = true
+    end
+    set_script_status(run[:controller].script, "recovered:#{action_id}")
+    publish_snapshot(force: true)
+    display("recovery acknowledged for #{action_id}; original test remains failed. LAB rechecks current state before another test.")
+    true
   end
 
   def self.request_controlled_return(run)
@@ -2692,6 +2703,10 @@ module LichAgentBridge
         Script.run('ebounty', nil, { quiet: true }) unless Script.running?('ebounty')
       elsif command.casecmp?('ebounty stop')
         Script.kill('ebounty') if Script.running?('ebounty')
+      elsif (recovery_match = command.match(/\Alab recover ([0-9a-f]{16}) confirm\z/i))
+        recover_controlled_handoff_locked(recovery_match[1].downcase, confirm: true)
+        report_action(action, 'completed', 'exact controller recovery acknowledged and published')
+        return
       elsif (controller_match = CONTROLLER_REGISTRY.match(command))
         execute_controller_action(action, controller_match)
         return
