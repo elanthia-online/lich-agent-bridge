@@ -53,12 +53,64 @@ class LabBridgeTest
       LichAgentBridge.handle_command("recover #{fixture[:action][:action_id]} confirm")
       refute run[:unsafe_handoff], 'confirmed safe recovery must release this exact old-generation lock'
       assert_equal old_result, run[:result], 'recovery must not rewrite the failed test result'
+      assert_equal "recovered:#{fixture[:action][:action_id]}",
+        LichAgentBridge.instance_variable_get(:@script_status).fetch(run[:controller].script)
       assert_equal 1, fixture[:starts].size
       assert_empty fixture[:child].kills
       receipt = fixture[:http].find { |_, path, data| path == '/v1/event' && data[:kind] == 'controller_recovery' }
       refute_nil receipt
       assert_equal fixture[:action][:generation], receipt[2][:data][:previous_generation]
       assert_equal fixture[:action][:action_id], receipt[2][:data][:action_id]
+    end
+  end
+
+  def test_brokered_recovery_uses_the_same_exact_native_verifier
+    with_failed_old_quick do |fixture, run|
+      old_result = Marshal.load(Marshal.dump(run[:result]))
+      recovery = {
+        action_id: 'aaaaaaaaaaaaaaaa',
+        character: 'Testmage',
+        generation: 'replacement-generation',
+        command: "lab recover #{fixture[:action][:action_id]} confirm",
+        expected_room_id: '1000',
+        expires_at: Time.now.to_f + 1
+      }
+
+      LichAgentBridge.execute_action(recovery)
+
+      refute run[:unsafe_handoff]
+      assert_equal old_result, run[:result]
+      receipt = fixture[:http].find { |_, path, data| path == '/v1/event' && data[:kind] == 'controller_recovery' }
+      refute_nil receipt
+      result = fixture[:results].find { |path, data| path == '/v1/actions/result' && data[:action_id] == recovery[:action_id] }
+      refute_nil result
+      assert_equal 'completed', result[1][:outcome]
+      assert_match(/recovery acknowledged/, result[1][:detail])
+    end
+  end
+
+  def test_brokered_recovery_reports_failure_when_receipt_cannot_publish
+    with_failed_old_quick do |fixture, run|
+      original = LichAgentBridge.method(:publish_event)
+      LichAgentBridge.define_singleton_method(:publish_event) { |*_| false }
+      recovery = {
+        action_id: 'aaaaaaaaaaaaaaaa',
+        character: 'Testmage',
+        generation: 'replacement-generation',
+        command: "lab recover #{fixture[:action][:action_id]} confirm",
+        expected_room_id: '1000',
+        expires_at: Time.now.to_f + 1
+      }
+
+      LichAgentBridge.execute_action(recovery)
+
+      assert run[:unsafe_handoff]
+      result = fixture[:results].find { |path, data| path == '/v1/actions/result' && data[:action_id] == recovery[:action_id] }
+      refute_nil result
+      assert_equal 'failed', result[1][:outcome]
+      assert_match(/receipt was not acknowledged/, result[1][:detail])
+    ensure
+      LichAgentBridge.define_singleton_method(:publish_event, original) if original
     end
   end
 
