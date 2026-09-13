@@ -89,7 +89,7 @@ class EvidenceWorkspace:
         self._requests[key] = len(self._entries)
         if identity is not None:
             self._identities[identity] = len(self._entries)
-        priority = {"knowledge.read": 3, "state.read": 2, "character.read": 2,
+        priority = {"knowledge.read": 3, "combat.report": 3, "state.read": 2, "character.read": 2,
                     "inventory.search": 1}.get(request["tool"], 0)
         self._entries.append(_Entry(record, self._clock, priority))
 

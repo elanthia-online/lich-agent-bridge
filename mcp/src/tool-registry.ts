@@ -43,6 +43,17 @@ export const DIRECT_TOOL_REGISTRY = {
     }),
     returnType: 'ItemPage',
   },
+  combatReport: {
+    toolName: 'lab.combat_report',
+    sdkMethod: 'combatReport',
+    route: 'combatReport',
+    description: 'Read retained recorded evidence for a LAB controller trial, after verified safe return. Historical association, not causal proof. No game commands. Omit operation_id for the latest controller operation.',
+    input: z.strictObject({
+      character,
+      operation_id: z.string().regex(/^[0-9a-f]{16}$/).optional(),
+    }),
+    returnType: 'CombatReport',
+  },
   wikiSearch: {
     toolName: 'lab.wiki_search',
     sdkMethod: 'wikiSearch',

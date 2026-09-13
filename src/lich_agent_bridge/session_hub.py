@@ -554,6 +554,28 @@ class SessionHub:
             "truncated": page["truncated"],
         }
 
+    def combat_report(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        from .combat_reports import operation_report
+
+        request = _strict(payload, label="combat report request",
+                          allowed={"character", "operation_id"}, required={"character"})
+        character = _character(request["character"])
+        if "operation_id" in request:
+            operation_id = request["operation_id"]
+            if not isinstance(operation_id, str) or not re.fullmatch(r"[0-9a-f]{16}", operation_id):
+                raise ValidationError("operation_id must be a LAB operation ID")
+            operation = self.capabilities.get(operation_id)
+            if (operation.character.casefold() != character.casefold()
+                    or not operation.capability.startswith("controller.")):
+                raise ValidationError("operation was not found for this character")
+        else:
+            history = [op for op in self.capabilities.history(character)
+                       if op.capability.startswith("controller.")]
+            if not history:
+                return {"character": character, "status": "unavailable", "reason": "no_retained_controller_operation"}
+            operation = history[-1]
+        return operation_report(self._operation_mapping(operation))
+
     def inventory_find(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         request = _strict(
             payload,

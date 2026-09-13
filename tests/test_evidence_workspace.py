@@ -25,6 +25,17 @@ def discovery(*ids, padding=0):
 
 
 class EvidenceWorkspaceTests(unittest.TestCase):
+    def test_deliberate_combat_report_survives_newer_discovery_noise(self):
+        workspace = EvidenceWorkspace(max_result_chars=6000, max_context_chars=8400, max_requests=8)
+        report = {"status": "observed", "data": {"operation_id": "a" * 16, "text": "MEASURED-COMBAT " + "x" * 4500},
+                  "sources": [{"source": "recorded_combat", "operation_id": "a" * 16}]}
+        workspace.add(request("combat.report", operation_id="a" * 16), report)
+        workspace.add(request("knowledge.search", query="combat"), discovery("noise", padding=4500))
+        records, sources = workspace.select()
+        self.assertEqual(records[0]["result"]["status"], "observed")
+        self.assertEqual(records[1]["result"]["status"], "not_in_context")
+        self.assertEqual(sources, report["sources"])
+
     def run_loop(self, model, session):
         return EvidenceLoop(max_result_chars=6000, max_evidence_chars=8400).run(
             model=model, session=session, instructions="Trusted policy", input_text="Explain the rules.",
