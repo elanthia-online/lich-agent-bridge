@@ -4,6 +4,37 @@ LAB gives Lich and script developers a structured interface to the actual game
 environment. It does not grant an agent permission to invent commands, launch
 arbitrary scripts, or experiment on a character without consent.
 
+## Recorded combat evidence
+
+The optional [combat-reporting interface](Combat-Reporting-Plan.md) attaches
+Recorder evidence to native Hunter trials after verified refuge return. Use
+`labctl combat-report CHARACTER --operation-id ID`, MCP `lab.combat_report`, or
+the conversational agent's `combat.report` tool. The ID is the LAB operation
+ticket, not a script name, creature ID, or action ID. Omit it for the latest
+controller operation; a running latest operation returns unavailable, not an
+older result disguised as current.
+
+This requires a player-started Recorder with post-commit receipt protocol 1,
+native trial recording context, and SQLite's statement-timeout support. LAB
+does not enable the recorder, change its subscriptions, or parse terminal
+reports. Results retain generation and operation attribution and are historical.
+They live only as long as retained SessionHub operation history.
+
+Compare observed damage, defenses, native trial outcomes, and elapsed time;
+do not equate attack-record count with cast count, or net resource change with
+spell cost. Partial/unknown evidence must remain unknown. The first slice does
+not support ordinary hunt-history search, status/flare causality, or automatic
+"best spell" rankings.
+
+Offline tests: `ruby tests/lab_combat_report_test.rb` uses synthetic SQLite
+fixtures. `LAB_TEST_LICH_CORE=/path/to/reviewed/lich-checkout ruby
+tests/lab_combat_recorder_integration_test.rb` exercises the actual Recorder
+contract without connecting to a game. A player-authorized single-target live
+trial on 2026-09-11 verified refuge return and matched its retained report to
+Recorder rows and game output. See the [acceptance scope and
+limits](Combat-Reporting-Plan.md#live-acceptance--2026-09-11); this does not verify
+all multi-target, group, or delayed-effect cases in live play.
+
 ## Start with an isolated reproduction
 
 Use the Python state, policy, operation, and HTTP tests plus the Ruby fake-Lich
