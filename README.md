@@ -90,10 +90,23 @@ Copy or symlink these files into the active Lich `scripts` directory:
 - `lich/lab-inventory.lic`
 - `lich/lich-state-core.rb`
 - `lich/lab-controller-registry.rb`
+- `lich/lab-controller-controls.rb`
+- `lich/lab-combat-report.rb`
 - `lich/lab-test-runner.rb`
 - `lich/lab-controllers.json`
 
 Each file needs its own entry in the active scripts directory because Lich resolves runtime dependencies there, even when `lab.lic` itself is a symlink.
+
+Optional combat reporting reuses Lich's `Combat::Recorder`; LAB does not start
+or replace it. With post-commit receipt protocol 1 and Hunter trial context
+support, `labctl combat-report CHARACTER --operation-id ID` reads the retained
+report after verified refuge return. Agents use `combat.report` in questions or
+`lab.combat_report` through MCP. Omitting the ID selects the latest controller
+operation, not a general hunt-history search. Missing support/data is reported
+as unavailable. This first slice reads the conventional per-character
+`combat_stats.db` location under Lich's data directory; custom Recorder paths
+are not discovered. See the [combat-reporting contract](wiki/project/Combat-Reporting-Plan.md)
+for prerequisites, limits, and the bounded live acceptance already completed.
 
 The bundled controller manifest is empty. Personal combat routines, hunting
 profiles, character builds, and equipment configuration are not distributed or

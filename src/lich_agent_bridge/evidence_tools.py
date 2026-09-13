@@ -42,6 +42,8 @@ def _schema(properties, required=()):
 CATALOG = [
     {"name": "state.read", "description": "Read current observed room, vitals, effects, wounds, scripts and hands; missing fields are unknown. No game commands.",
      "parameters": _schema({"sections": {"type": "array", "items": {"type": "string", "enum": list(STATE_SECTIONS)}, "minItems": 1, "maxItems": 6, "uniqueItems": True}})},
+    {"name": "combat.report", "description": "Read recorded combat evidence for this character's retained LAB controller trial. Optional operation_id selects an exact LAB operation; default latest controller operation. Historical observations, not a live scan or causal proof. No game commands; ordinary hunts without LAB trials are not covered.",
+     "parameters": _schema({"operation_id": {"type": "string", "pattern": "^[0-9a-f]{16}$"}})},
     {"name": "character.read", "description": "Read character stats and training ranks. prefer_fresh reuses recent same-session observations or requests approved INFO/SKILLS; cached never sends commands. Denied refresh returns historical evidence labeled as such.",
      "parameters": _schema({"categories": {"type": "array", "items": {"type": "string", "enum": ["info", "skills"]}, "minItems": 1, "maxItems": 2, "uniqueItems": True},
                              "freshness": {"type": "string", "enum": ["prefer_fresh", "cached"]}})},
@@ -112,12 +114,16 @@ class EvidenceSession:
             raise ValidationError("unsupported evidence tool")
         if not isinstance(arguments, Mapping):
             raise ValidationError("evidence arguments must be an object")
-        allowed = {"state.read": {"sections"}, "character.read": {"categories", "freshness"},
+        allowed = {"combat.report": {"operation_id"}, "state.read": {"sections"}, "character.read": {"categories", "freshness"},
                    "inventory.search": {"query"}, "knowledge.search": {"query", "scope"},
                    "knowledge.read": {"source_id", "section_id", "cursor"}}[tool]
         if set(arguments) - allowed:
             raise ValidationError("unsupported evidence argument")
-        if tool.endswith(".search"):
+        if tool == "combat.report":
+            if "operation_id" in arguments and (not isinstance(arguments["operation_id"], str)
+                    or not re.fullmatch(r"[0-9a-f]{16}", arguments["operation_id"])):
+                raise ValidationError("combat report requires a LAB operation ID")
+        elif tool.endswith(".search"):
             query = arguments.get("query")
             limit = 200 if tool == "inventory.search" else 300
             if not isinstance(query, str) or not query.strip() or len(query) > limit or "\x00" in query:
@@ -172,7 +178,26 @@ class EvidenceSession:
         self.validate(tool, arguments)
         snapshot = self._check(control)
         try:
-            if tool == "state.read":
+            if tool == "combat.report":
+                try:
+                    report = self._hub.combat_report({"character": self._character, **arguments})
+                except ValidationError:
+                    report = {"status": "unavailable", "reason": "operation_not_available"}
+                if len(json.dumps(report)) > self._max_evidence_chars:
+                    result = self._envelope("unavailable", {}, diagnostics=[{
+                        "source": "combat.report", "status": "output_budget",
+                        "detail": "Combat report omitted because it exceeds the evidence output budget."}])
+                else:
+                    status = report.get("status", "unavailable")
+                    sources = [] if status == "unavailable" else [{
+                        "source": "recorded_combat", "title": f"{self._character}: controller trial report",
+                        "authority": "historical_recorder_observation", "evidence_kind": "read",
+                        "operation_id": report.get("operation_id"), "generation": report.get("generation"),
+                        "observed_at": report.get("ended_at")}]
+                    result = self._envelope(status, report, sources=sources, diagnostics=[{
+                        "source": "combat.report", "status": status,
+                        "detail": report.get("reason", "Retained historical trial report; not current game state.")}])
+            elif tool == "state.read":
                 result = self._state(snapshot, arguments)
             elif tool == "character.read":
                 result = self._character_read(snapshot, arguments, control)

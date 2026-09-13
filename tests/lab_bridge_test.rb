@@ -97,6 +97,34 @@ load File.expand_path('../lich/lab-bridge.lic', __dir__)
 $LOADED_FEATURES.delete(CONTROLLER_REGISTRY_SOURCE)
 
 class LabBridgeTest < Minitest::Test
+  def test_combat_report_uses_raw_trials_and_separate_verified_handoff
+    trials = [{ routine: 'a', target_id: '123' }]
+    runtime = Object.new
+    runtime.define_singleton_method(:status) { { objective: { results: trials } } }
+    capture = Object.new
+    calls = []
+    capture.define_singleton_method(:report) do |trials:, safe:|
+      calls << [trials, safe]
+      LabCombatReport.unavailable('fixture')
+    end
+    result = { ok: false, code: 'work_failed', details: { recovery_complete: true } }
+    LichAgentBridge.attach_combat_report({ runtime: runtime, combat_capture: capture }, result)
+    assert_equal [[trials, true]], calls
+    refute result[:ok]
+    assert_equal 'work_failed', result[:code]
+    assert_equal 'fixture', JSON.parse(result[:details][:combat_report_json])['reason']
+  end
+
+  def test_reporting_failure_does_not_relabel_success_or_handoff
+    capture = Object.new
+    capture.define_singleton_method(:report) { |**_| raise 'fixture' }
+    result = { ok: true, code: 'completed', details: { recovery_complete: true } }
+    LichAgentBridge.attach_combat_report({ combat_capture: capture }, result)
+    assert result[:ok]
+    assert result[:details][:recovery_complete]
+    assert_equal 'report_failed', JSON.parse(result[:details][:combat_report_json])['reason']
+  end
+
   def test_runtime_load_replaces_a_cached_controller_registry
     assert_equal CONTROLLER_REGISTRY_SOURCE, LabControllerRegistry::Registry.method(:load).source_location.first
   end

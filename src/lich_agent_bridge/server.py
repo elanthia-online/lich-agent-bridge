@@ -218,6 +218,8 @@ class LabRequestHandler(BaseHTTPRequestHandler):
                 self._json(200, self.server.session_hub.snapshot(payload))
             elif parsed.path == "/v1/session/watch":
                 self._json(200, self.server.session_hub.watch(payload))
+            elif parsed.path == "/v1/session/combat/report":
+                self._json(200, self.server.session_hub.combat_report(payload))
             elif parsed.path == "/v1/session/inventory/find":
                 self._json(200, self.server.session_hub.inventory_find(payload))
             elif parsed.path == "/v1/session/wiki/search":

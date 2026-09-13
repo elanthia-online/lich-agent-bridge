@@ -50,6 +50,7 @@ export function generatedSdkTypes(): string {
     'export interface InventoryIdentity { type: string; noun: string; name: string; full_name: string }',
     'export interface InventoryItem { dossier_id: string; fingerprint: string; identity: InventoryIdentity; last_game_id: string | null; last_seen_at: string | null; last_location: Record<string, JsonValue> | null; facts: Record<string, JsonValue>[] }',
     'export interface ItemPage { items: InventoryItem[]; total: number }',
+    "export interface CombatReport { character: string; status: 'observed' | 'partial' | 'unavailable'; reason?: string; operation_id?: string; operation_status?: OperationStatus; historical?: boolean; ended_at?: number | null; generation?: string | null; action_id?: string | null; recovery_complete?: boolean; report?: Record<string, JsonValue> }",
     'export interface KnowledgeExcerpt { authority: string; title: string; text: string; source: string; url: string | null; revision_id: number | null }',
     'export interface KnowledgePage { items: KnowledgeExcerpt[]; total: number }',
     "export type OperationStatus = 'requested' | 'admitted' | 'running' | 'succeeded' | 'failed' | 'timed_out' | 'interrupted'",

@@ -118,6 +118,10 @@ def parser() -> argparse.ArgumentParser:
     inventory.add_argument("character")
     inventory.add_argument("query")
 
+    combat_report = commands.add_parser("combat-report", help="read retained LAB trial combat evidence")
+    combat_report.add_argument("character")
+    combat_report.add_argument("--operation-id")
+
     sources = commands.add_parser(
         "sources", help="show references supplied to a character's most recent answer"
     )
@@ -920,6 +924,12 @@ def main(argv: list[str] | None = None) -> None:
                 f"/v1/state/{character}", settings=settings, token=token
             )
         )
+        return
+    if args.command == "combat-report":
+        payload = {"character": args.character}
+        if args.operation_id:
+            payload["operation_id"] = args.operation_id
+        _dump(_post("/v1/session/combat/report", payload, settings=settings, token=token))
         return
     if args.command == "inventory":
         _dump(

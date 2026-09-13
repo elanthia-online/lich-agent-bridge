@@ -10,6 +10,7 @@ This is an implemented application protocol, not general model tool authority.
 | `state.read` | Observed room, vitals, effects, wounds, scripts, and hands |
 | `character.read` | Recorded/current stats and training; fixed INFO/SKILLS refresh when eligible |
 | `inventory.search` | This character's recorded item dossiers |
+| `combat.report` | Retained native trial reports, bound to this character and LAB operation; no game commands |
 | `knowledge.search` | Compact source discovery; reference, character, or development scope |
 | `knowledge.read` | Issued source/section handle and optional continuation; no arbitrary paths or URLs |
 

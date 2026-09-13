@@ -98,6 +98,16 @@ class ControllerControlHTTPTests(unittest.TestCase):
         self.assertEqual(action["command"], f"lab-test-quick hold {result['run_id']}")
         self.assertTrue(any(event.get("action_id") == action["action_id"] for event in self.audit))
         self.assertEqual(len(self.runner.history("Testmage")), 1)
+
+    def test_combat_report_route_is_authenticated_read_only_and_character_bound(self):
+        payload = {"character": "Testmage", "operation_id": self.operation.operation_id}
+        route = "/v1/session/combat/report"
+        self.assertEqual(self.post(payload, route=route, token=None)[0], 401)
+        status, result = self.post(payload, route=route)
+        self.assertEqual(status, 200)
+        self.assertEqual(result["reason"], "operation_not_terminal")
+        self.assertEqual(self.post({**payload, "character": "Other"}, route=route)[0], 400)
+        self.assertEqual(len(self.runner.history("Testmage")), 1)
         self.assertEqual(self.model.calls, [])
 
     def test_missing_and_wrong_auth_are_rejected_before_delegation(self):
