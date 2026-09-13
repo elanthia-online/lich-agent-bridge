@@ -5,7 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { createApp } from '../src/server.js';
 
-test('Streamable HTTP MCP endpoint advertises the exact nine-tool surface', async (context) => {
+test('Streamable HTTP MCP endpoint advertises the exact ten-tool surface', async (context) => {
   const app = createApp({
     host: '127.0.0.1',
     port: 1,
@@ -24,6 +24,7 @@ test('Streamable HTTP MCP endpoint advertises the exact nine-tool surface', asyn
   const listed = await client.listTools();
   assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), [
     'lab.capabilities',
+    'lab.combat_report',
     'lab.execute_code',
     'lab.inventory_find',
     'lab.operation_watch',

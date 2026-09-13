@@ -38,6 +38,7 @@ Copy or symlink each file into the active Lich scripts directory:
 - `lich/lich-state-core.rb`
 - `lich/lab-controller-registry.rb`
 - `lich/lab-controller-controls.rb`
+- `lich/lab-combat-report.rb`
 - `lich/lab-test-runner.rb`
 - `lich/lab-controllers.json`
 

@@ -72,7 +72,7 @@ class EvidenceToolsTest(unittest.TestCase):
 
     def test_catalog_is_copy_and_only_reusable_observation_tools(self):
         catalog = self.session.catalog()
-        self.assertEqual({tool["name"] for tool in catalog}, {"state.read", "character.read", "inventory.search", "knowledge.search"})
+        self.assertEqual({tool["name"] for tool in catalog}, {"state.read", "character.read", "inventory.search", "knowledge.search", "combat.report"})
         catalog[0]["name"] = "commands.run"
         self.assertEqual(self.session.catalog()[0]["name"], "state.read")
 
