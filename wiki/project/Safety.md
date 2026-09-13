@@ -113,12 +113,16 @@ The earlier experimental `quick_area` field-handoff exception is superseded:
 old registrations can load for migration but cannot launch Quick tests.
 Manually operated Bigshot Quick is not made dependent on LAB or this workflow.
 
-After a LAB generation change, only explicit player confirmation through
-`;lab recover RUN_ID confirm` may reconcile a retained native failure. The
-bridge requires exact child/monitor exit and fresh refuge, survival, posture,
-original equipment and owner-release checks. LAB requires the matching native
-receipt and independently rechecks current state. This restores eligibility,
-not execution authority, and never rewrites the failed test as a pass. See
+After a LAB generation change, only explicit operator confirmation may
+reconcile a retained native failure. The player may enter
+`;lab recover RUN_ID confirm`, or explicitly direct an agent to invoke the
+narrow `session.recover_controller` capability with that exact ID and
+`confirm: true`. The capability requires the current expected generation and
+passes through the ordinary action broker; it grants no general script-command
+access. The bridge requires exact child/monitor exit and fresh refuge, survival,
+posture, original equipment and owner-release checks. LAB requires the matching
+native receipt and independently rechecks current state. This restores
+eligibility, not execution authority, and never rewrites the failed test as a pass. See
 [player-confirmed recovery](Controller-Controls.md#player-confirmed-recovery-after-a-lab-restart).
 
 Direct `travel.go2` can perform separately authorized navigation or recovery

@@ -106,6 +106,20 @@ CAPABILITY_DEFINITIONS = (
         arguments=_EMPTY_ARGUMENTS,
         handler_name="_execute_room_loot",
     ),
+    CapabilityDefinition(
+        name="session.recover_controller",
+        summary="After explicit operator confirmation, acknowledge one exact safe controller handoff in the owning logged-in session.",
+        arguments={
+            "type": "object",
+            "properties": {
+                "action_id": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+                "confirm": {"type": "boolean", "const": True},
+            },
+            "required": ["action_id", "confirm"],
+            "additionalProperties": False,
+        },
+        handler_name="_execute_controller_recovery",
+    ),
 )
 @dataclass(frozen=True, slots=True)
 class OwnedLocation:
@@ -258,6 +272,9 @@ class EvidenceAdapter(Protocol):
                                    previous_generation: str, generation: str,
                                    action_id: str, room_id: str,
                                    hands: tuple[str | None, str | None]) -> bool: ...
+
+    def controller_recovery_receipt(self, *, character: str, generation: str,
+                                    action_id: str) -> Mapping[str, Any] | None: ...
 
 
 StepHook = Callable[[ActionBroker, Mapping[str, Any], SessionState], None]
@@ -1023,6 +1040,152 @@ class CapabilityRunner:
         )
         operation.end_state = end
         return "ELoot completion and removal of every starting exact corpse ID verified"
+
+    def _execute_controller_recovery(self, operation: OperationRecord) -> str:
+        if set(operation.arguments) != {"action_id", "confirm"}:
+            raise _OperationAbort(
+                "failed", "controller recovery requires only action_id and confirm"
+            )
+        action_id = operation.arguments.get("action_id")
+        if (
+            not isinstance(action_id, str)
+            or re.fullmatch(r"[0-9a-f]{16}", action_id) is None
+            or operation.arguments.get("confirm") is not True
+        ):
+            raise _OperationAbort(
+                "failed", "controller recovery requires an exact action ID and confirm=true"
+            )
+        if operation.expected_generation is None:
+            raise _OperationAbort(
+                "failed", "controller recovery requires expected_generation at admission"
+            )
+
+        with self._lock:
+            pending = self._refuge_pending.get(operation.character.casefold())
+        if pending is not None and action_id != pending[3]:
+            raise _OperationAbort(
+                "failed", "action_id does not match this character's unresolved handoff"
+            )
+
+        start = self._require_fresh_session(operation)
+        operation.start_state = start
+        if pending is None:
+            self._validate_recovery_candidate_start(start)
+        else:
+            _previous_operation_id, controller, original, _pending_action_id = pending
+            self._validate_controller_start(start, controller)
+            if self._hand_ids(start) != self._hand_ids(original):
+                raise _OperationAbort(
+                    "failed", "controller recovery requires the original held equipment"
+                )
+        self._admit_and_start(
+            operation,
+            admitted_detail="exact unresolved controller handoff and current safe state verified",
+            running_detail="operator-confirmed recovery acknowledgement running in owning session",
+        )
+        self._run_broker_step(
+            operation,
+            start,
+            f"lab recover {action_id} confirm",
+            "acknowledging exact controller recovery",
+        )
+        end = self._require_fresh_session(
+            operation,
+            expected_generation=start.generation,
+            after_sequence=start.sequence,
+        )
+        receipt_reader = getattr(self._evidence, "controller_recovery_receipt", None)
+        receipt = None if receipt_reader is None else receipt_reader(
+            character=operation.character,
+            generation=end.generation,
+            action_id=action_id,
+        )
+        if not isinstance(receipt, Mapping):
+            raise _OperationAbort(
+                "failed", "owning session did not publish matching controller recovery evidence"
+            )
+        controller_name = receipt.get("controller")
+        previous_generation = receipt.get("previous_generation")
+        room_id = receipt.get("room_id")
+        receipt_hands = receipt.get("hands")
+        if (
+            not isinstance(controller_name, str)
+            or not controller_name
+            or receipt.get("action_id") != action_id
+            or not isinstance(previous_generation, str)
+            or not previous_generation
+            or receipt.get("operator_confirmed") is not True
+            or not isinstance(room_id, str)
+            or not isinstance(receipt_hands, Mapping)
+            or set(receipt_hands) != {"left", "right"}
+            or any(
+                item is not None and (not isinstance(item, str) or not item)
+                for item in receipt_hands.values()
+            )
+        ):
+            raise _OperationAbort(
+                "failed", "owning session published malformed controller recovery evidence"
+            )
+        try:
+            controller = self._controller_manifest.controller(controller_name)
+        except (ValidationError, KeyError) as error:
+            raise _OperationAbort(
+                "failed", "recovery evidence names an unregistered controller"
+            ) from error
+        if (
+            not controller.available_for(operation.character)
+            or controller.safe_handoff["kind"]
+            not in {"quick_refuge", "controller_refuge"}
+            or room_id != controller.safe_handoff["room_id"]
+        ):
+            raise _OperationAbort(
+                "failed", "recovery evidence does not match this character's registered refuge controller"
+            )
+        if pending is not None and (
+            controller.name != pending[1].name
+            or previous_generation != pending[2].generation
+            or (receipt_hands.get("left"), receipt_hands.get("right"))
+            != self._hand_ids(pending[2])
+        ):
+            raise _OperationAbort(
+                "failed", "recovery evidence does not match the retained controller handoff"
+            )
+        self._validate_controller_start(end, controller)
+        if self._hand_ids(end) != (
+            receipt_hands.get("left"),
+            receipt_hands.get("right"),
+        ):
+            raise _OperationAbort(
+                "failed", "controller recovery changed the original held equipment"
+            )
+        with self._lock:
+            current = self._refuge_pending.get(operation.character.casefold())
+            if pending is not None and current != pending:
+                raise _OperationAbort(
+                    "failed", "unresolved controller handoff changed during recovery"
+                )
+            if pending is not None:
+                self._refuge_pending.pop(operation.character.casefold())
+        operation.end_state = end
+        return "Owning session acknowledged the exact failed run; safe state, equipment, owner release and recovery evidence verified"
+
+    @staticmethod
+    def _validate_recovery_candidate_start(snapshot: SessionState) -> None:
+        if snapshot.dead is not False or snapshot.stunned is not False:
+            raise _OperationAbort(
+                "failed", "controller recovery requires known alive and unstunned state"
+            )
+        CapabilityRunner._hand_ids(snapshot)
+        if snapshot.owners is None or any(
+            owner is not None for owner in snapshot.owners.values()
+        ):
+            raise _OperationAbort(
+                "failed", "controller recovery requires every published owner lane released"
+            )
+        if snapshot.scripts is None:
+            raise _OperationAbort(
+                "failed", "controller recovery requires known script ownership"
+            )
 
     def _execute_controller(self, operation: OperationRecord) -> str:
         controller_name = operation.capability.removeprefix("controller.")

@@ -258,6 +258,113 @@ class RefugeOutingTests(unittest.TestCase):
         self.assertEqual(failed.status, "failed")
         self.assertTrue(failed.alerts)
 
+    def test_typed_capability_recovers_exact_pending_handoff_in_owning_session(self):
+        self.evidence.controller_result = None
+        failed = self.run_outing()
+        _, _controller, _original, action_id = self.runner._refuge_pending["testmage"]
+        self.state.generation = "generation-2"
+        self.state.sequence = 1
+        self.broker.admit_generation("Testmage", "generation-2")
+        self.evidence.controller_recovery_receipt_result = {
+            "controller": "quick",
+            "action_id": action_id,
+            "previous_generation": "generation-1",
+            "operator_confirmed": True,
+            "room_id": "1000",
+            "hands": {"left": None, "right": "777"},
+        }
+
+        result = self.runner.perform(
+            "Testmage",
+            "session.recover_controller",
+            {"action_id": action_id, "confirm": True},
+            expected_generation="generation-2",
+        )
+
+        self.assertEqual(result.status, "succeeded", result.explanation)
+        self.assertEqual(self.driver.commands[-1], f"lab recover {action_id} confirm")
+        self.assertFalse(self.runner._refuge_pending)
+        self.assertEqual(failed.status, "failed")
+        self.assertTrue(failed.alerts)
+
+    def test_typed_recovery_uses_native_receipt_after_sidecar_restart(self):
+        self.evidence.controller_result = None
+        self.run_outing()
+        _, _controller, _original, action_id = self.runner._refuge_pending["testmage"]
+        restarted = CapabilityRunner(
+            actions=self.broker,
+            state=self.state,
+            evidence=self.evidence,
+            controller_manifest=self.manifest,
+            clock=self.clock,
+            sleeper=self.clock.sleep,
+            step_hook=self.driver,
+        )
+        self.state.generation = "generation-2"
+        self.state.sequence = 1
+        self.broker.admit_generation("Testmage", "generation-2")
+        self.evidence.controller_recovery_receipt_result = {
+            "controller": "quick",
+            "action_id": action_id,
+            "previous_generation": "generation-1",
+            "operator_confirmed": True,
+            "room_id": "1000",
+            "hands": {"left": None, "right": "777"},
+        }
+
+        result = restarted.perform(
+            "Testmage",
+            "session.recover_controller",
+            {"action_id": action_id, "confirm": True},
+            expected_generation="generation-2",
+        )
+
+        self.assertEqual(result.status, "succeeded", result.explanation)
+        self.assertEqual(self.driver.commands[-1], f"lab recover {action_id} confirm")
+        self.assertFalse(restarted._refuge_pending)
+
+    def test_typed_recovery_refuses_wrong_id_or_missing_explicit_confirmation(self):
+        self.evidence.controller_result = None
+        self.run_outing()
+        command_count = len(self.driver.commands)
+        cases = (
+            ({"action_id": "ffffffffffffffff", "confirm": True}, "does not match"),
+            ({"action_id": "0123456789abcdef", "confirm": False}, "confirm=true"),
+            ({"action_id": "0123456789abcdef"}, "only action_id and confirm"),
+        )
+        for arguments, detail in cases:
+            with self.subTest(arguments=arguments):
+                result = self.runner.perform(
+                    "Testmage",
+                    "session.recover_controller",
+                    arguments,
+                    expected_generation="generation-1",
+                )
+                self.assertEqual(result.status, "failed")
+                self.assertIn(detail, result.explanation)
+        self.assertEqual(len(self.driver.commands), command_count)
+        self.assertTrue(self.runner._refuge_pending)
+
+    def test_typed_recovery_keeps_exclusion_without_matching_native_evidence(self):
+        self.evidence.controller_result = None
+        self.run_outing()
+        _, _controller, _original, action_id = self.runner._refuge_pending["testmage"]
+        self.state.generation = "generation-2"
+        self.state.sequence = 1
+        self.broker.admit_generation("Testmage", "generation-2")
+        self.evidence.controller_recovery_receipt_result = None
+
+        result = self.runner.perform(
+            "Testmage",
+            "session.recover_controller",
+            {"action_id": action_id, "confirm": True},
+            expected_generation="generation-2",
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("matching controller recovery evidence", result.explanation)
+        self.assertTrue(self.runner._refuge_pending)
+
     def test_reaching_refuge_with_wrong_hands_is_not_safe(self):
         self.verify_hook = lambda *_: setattr(self.state, "hands", {"left": HandItem("888", "knife"), "right": HandItem("777", "test weapon")})
         result = self.run_outing()
