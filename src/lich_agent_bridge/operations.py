@@ -120,6 +120,19 @@ CAPABILITY_DEFINITIONS = (
         },
         handler_name="_execute_controller_recovery",
     ),
+    CapabilityDefinition(
+        name="session.command",
+        summary="Send one game command through a locally enabled full-access session; delivery is verified but the game effect is not inferred.",
+        arguments={
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "minLength": 1, "maxLength": 140},
+            },
+            "required": ["command"],
+            "additionalProperties": False,
+        },
+        handler_name="_execute_session_command",
+    ),
 )
 @dataclass(frozen=True, slots=True)
 class OwnedLocation:
@@ -1168,6 +1181,46 @@ class CapabilityRunner:
                 self._refuge_pending.pop(operation.character.casefold())
         operation.end_state = end
         return "Owning session acknowledged the exact failed run; safe state, equipment, owner release and recovery evidence verified"
+
+    def _execute_session_command(self, operation: OperationRecord) -> str:
+        if set(operation.arguments) != {"command"}:
+            raise _OperationAbort("failed", "session.command accepts only command")
+        command = operation.arguments.get("command")
+        if not isinstance(command, str):
+            raise _OperationAbort("failed", "command must be a string")
+        command = command.strip()
+        if not command or len(command) > 140:
+            raise _OperationAbort("failed", "command must contain 1 to 140 characters")
+        if any(character in command for character in ("\x00", "\r", "\n", ";", "|", "&")):
+            raise _OperationAbort("failed", "command chaining or control characters are forbidden")
+        if command.startswith(","):
+            raise _OperationAbort("failed", "client commands are not game commands")
+
+        start = self._require_fresh_session(operation)
+        operation.start_state = start
+        if not isinstance(start.script_status, Mapping) or start.script_status.get("lab-access") != "full":
+            raise _OperationAbort("failed", "local LAB full access is not enabled for this session")
+        self._admit_and_start(
+            operation,
+            admitted_detail="local full-access grant and current session admitted",
+            running_detail="single game-command delivery running",
+        )
+        action = self._run_broker_step(
+            operation,
+            start,
+            f"lab direct {command}",
+            "sending locally authorized game command",
+        )
+        end = self._require_fresh_session(
+            operation,
+            expected_generation=start.generation,
+            after_sequence=start.sequence,
+        )
+        expected_status = f"completed:{action['action_id']}"
+        if not isinstance(end.script_status, Mapping) or end.script_status.get("lab-direct") != expected_status:
+            raise _OperationAbort("failed", "native game-command delivery receipt was not observed")
+        operation.end_state = end
+        return "native session verified command delivery; game effect remains unverified"
 
     @staticmethod
     def _validate_recovery_candidate_start(snapshot: SessionState) -> None:

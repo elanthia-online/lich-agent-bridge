@@ -1374,7 +1374,7 @@ class LabBridgeTest < Minitest::Test
     LichAgentBridge.instance_variable_set(:@snapshot_generation_rejected, false)
     LichAgentBridge.instance_variable_set(:@last_action_registration_at, Time.at(0))
     LichAgentBridge.instance_variable_set(:@observed_inactive_spells, {})
-    LichAgentBridge.instance_variable_set(:@script_status, {})
+    LichAgentBridge.instance_variable_set(:@script_status, { 'lab-access' => 'guarded' })
     LichAgentBridge.instance_variable_set(:@pending, [])
     LichAgentBridge.instance_variable_set(:@running, true)
     LichAgentBridge.instance_variable_set(:@command_queue, Queue.new)

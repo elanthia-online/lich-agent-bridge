@@ -95,6 +95,29 @@ class ActionBrokerTests(unittest.TestCase):
             self.broker.get(action["action_id"])["completion"], "sent_unverified"
         )
 
+    def test_full_access_wrapper_dispatches_one_audited_game_command(self):
+        proposed = self.broker.submit(
+            ActionProposal(character="Testscout", command="lab direct join Calvix")
+        )
+
+        self.assertEqual(proposed["status"], "queued")
+        self.assertEqual(proposed["kind"], "direct")
+        action = self.broker.poll(ActionContext("Testscout", "1000"))
+        self.assertEqual(action["command"], "lab direct join Calvix")
+
+    def test_full_access_wrapper_rejects_client_commands_and_chaining(self):
+        for command in (
+            "lab direct ;e puts 'no'",
+            "lab direct , ask something",
+            "lab direct join Calvix;drop all",
+            "lab direct join Calvix\nquit",
+        ):
+            with self.subTest(command=command):
+                with self.assertRaises(ValidationError):
+                    self.broker.submit(
+                        ActionProposal(character="Testscout", command=command)
+                    )
+
     def test_poll_wait_wakes_when_an_action_is_submitted(self):
         observed = []
 

@@ -814,10 +814,10 @@ class ServerTests(unittest.TestCase):
             authorized=True,
         )
         self.assertEqual(status, 200)
-        self.assertEqual(capabilities["total"], 6)
+        self.assertEqual(capabilities["total"], 7)
         self.assertEqual({item["name"] for item in capabilities["items"]},
                          {"travel.go2", "character.recon", "item.audit", "hunt.prepare", "room.loot",
-                          "session.recover_controller"})
+                          "session.recover_controller", "session.command"})
         self.assertFalse(
             next(
                 item

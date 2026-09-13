@@ -347,7 +347,7 @@ class SessionHubTests(unittest.TestCase):
         result = hub.capability_catalog({"character": "Testknight"})
 
         self.assertEqual(result["character"], "Testknight")
-        self.assertEqual(result["total"], 6)
+        self.assertEqual(result["total"], 7)
         self.assertFalse(any(item["name"].startswith("controller.") for item in result["items"]))
         self.assertEqual(
             {item["name"] for item in result["items"]},
@@ -358,6 +358,7 @@ class SessionHubTests(unittest.TestCase):
                 "hunt.prepare",
                 "room.loot",
                 "session.recover_controller",
+                "session.command",
             },
         )
         with self.assertRaisesRegex(ValidationError, "unsupported capabilities request field"):

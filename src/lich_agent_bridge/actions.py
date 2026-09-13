@@ -363,6 +363,7 @@ class CommandPolicy:
     )
     _MIRACLE_TELEPORT = re.compile(r"\Abeseech teleport\Z")
     _SESSION_RECOVERY = re.compile(r"\Alab recover [0-9a-f]{16} confirm\Z")
+    _DIRECT_COMMAND = re.compile(r"\Alab direct ([^\r\n]{1,140})\Z", re.IGNORECASE)
     _ELOOT_CURRENT_ROOM = re.compile(r"\Aeloot loot\Z")
     _READ_ONLY = re.compile(
         r"\A(?:look|read|inspect|analyze|assess|appraise|browse|shop)(?:\s+[^\r\n]{1,130})?\Z"
@@ -432,6 +433,12 @@ class CommandPolicy:
             raise ValidationError("command chaining or control characters are forbidden")
         collapsed = " ".join(command.split())
         folded = collapsed.casefold()
+        direct = self._DIRECT_COMMAND.fullmatch(collapsed)
+        if direct is not None:
+            inner = direct.group(1).strip()
+            if not inner or inner.startswith((",", ";")):
+                raise ValidationError("direct game command cannot invoke a client command")
+            return f"lab direct {inner}", PolicyDecision("direct", False)
         if folded.startswith(",") or any(
             pattern.search(folded) for pattern in self._FORBIDDEN
         ):
