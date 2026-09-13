@@ -126,6 +126,25 @@ without a combat launch. It uses existing native go2, exact child ownership,
 bounded authority and verified arrival. It does not override action revocation
 or declare an arbitrary destination safe. See [direct travel](Developer-Testing.md#direct-native-go2-travel).
 
+## Locally enabled exploratory access
+
+Guarded mode remains the default interface for routine use. During supervised
+exploratory testing, the player may enter `;lab full access on` in one owning
+Lich session. This exposes `session.command` for that character without requiring
+a predeclared profile or per-verb capability. The grant is local, per-session,
+and cannot be enabled by the sidecar or an agent request.
+
+The command still passes through the ordinary generation-bound, expiring,
+one-at-a-time broker and the native bridge rechecks the local grant immediately
+before sending it. Only one game-input line is accepted; client/Lich commands,
+newlines and chaining characters are rejected. A successful operation proves
+native delivery, not that the game accepted or performed the command. Agents
+must use subsequent state or event evidence for consequential claims.
+
+Use `;lab full access off` when exploratory work ends. Stopping LAB or the Lich
+session also removes the grant. Stable repeated behavior belongs in a typed
+capability or registered controller, where its semantic outcome can be verified.
+
 An authorized movement or combat operation is complete only when fresh evidence
 shows the character alive in the configured safe room with ownership released.
 Stopping a combat script in the field is not a safe handoff. The local supervisor

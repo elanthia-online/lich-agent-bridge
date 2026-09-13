@@ -138,6 +138,8 @@ Management:
 ;lab forget
 ;lab actions on
 ;lab actions off
+;lab full access on
+;lab full access off
 ;lab approve
 ;lab approve auto
 ;lab approve auto off
@@ -152,7 +154,7 @@ original equipment and released ownership before acknowledging that one run.
 It sends no game commands and does not turn the failed test into a pass.
 See [recovery checks](wiki/project/Controller-Controls.md#player-confirmed-recovery-after-a-lab-restart).
 
-The default catalog contains five capabilities:
+The default catalog contains six capabilities:
 
 - `character.recon`: fixed INFO/SKILLS inspection with verified observations.
 - `travel.go2`: exact-room native go2 travel with bounded execution and verified
@@ -161,6 +163,18 @@ The default catalog contains five capabilities:
 - `room.loot`: a bounded ELoot sweep with admission and outcome checks.
 - `hunt.prepare`: unavailable without a configured character profile; no profiles
   are bundled.
+- `session.command`: in a locally enabled full-access session, deliver one
+  generation-bound, audited game command without requiring a profile. The
+  receipt proves delivery only; callers must inspect fresh state or game evidence
+  before claiming that the requested effect occurred.
+
+Full access is an exploratory-testing mode, not the default policy. The player
+must enable it inside each owning Lich session with `;lab full access on`; it
+cannot be enabled remotely. `;lab full access off`, `;lab actions off`, stopping
+LAB, or ending the Lich session removes that authority. Full access accepts one
+game-input line at a time and still rejects client/Lich commands, multiline input,
+and command chaining. Repeatable workflows should graduate to typed capabilities
+or registered controllers once their contract is understood.
 
 The controller manifest is empty. Retrieve the live catalog and its schemas
 instead of hard-coding availability:

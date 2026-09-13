@@ -113,6 +113,7 @@ module LichAgentBridge
     /\Aeherbs heal\z/i,
     /\Abigshot (?:start|stop)\z/i,
     /\Aebounty (?:start|stop)\z/i,
+    /\Alab direct [^\r\n]{1,140}\z/i,
     *CONTROLLER_REGISTRY.safe_patterns,
     /\Abeseech teleport\z/i,
     /\A(?:flag|stow set|store set) [^\r\n]{1,130}\z/i,
@@ -172,6 +173,7 @@ module LichAgentBridge
   @pending_mutex = Mutex.new
   @running = true
   @actions_enabled = true
+  @full_access = false
   @execution_mutex = Mutex.new
   @sequence_response_mutex = Mutex.new
   @sequence_response_cv = ConditionVariable.new
@@ -193,7 +195,7 @@ module LichAgentBridge
   @diagnostic_capture = nil
   @diagnostic_capture_mutex = Mutex.new
   @last_observation = nil
-  @script_status = {}
+  @script_status = { 'lab-access' => 'guarded' }
   @script_status_mutex = Mutex.new
   @observed_inactive_spells = {}
   @spell_evidence_mutex = Mutex.new
@@ -951,7 +953,8 @@ module LichAgentBridge
     model = body[:model_configured] ? 'model configured' : 'model unavailable'
     actions = @actions_enabled ? 'actions enabled' : 'actions disabled'
     auto = @auto_approve ? 'auto-approve enabled' : 'auto-approve disabled'
-    display("sidecar online, backend=#{body[:backend]}, #{model}, capability=#{body[:capability]}, #{actions}, #{auto}")
+    access = @full_access ? 'full access enabled' : 'guarded access'
+    display("sidecar online, backend=#{body[:backend]}, #{model}, capability=#{body[:capability]}, #{actions}, #{auto}, #{access}")
   rescue => error
     display("sidecar offline (#{error.message})")
   end
@@ -1153,6 +1156,8 @@ module LichAgentBridge
     unless enabled
       @pending_approval_id = nil
       @auto_approve = false
+      @full_access = false
+      set_script_status('lab-access', 'guarded')
     end
     body = action_request(
       '/v1/actions/control',
@@ -1168,6 +1173,23 @@ module LichAgentBridge
     else
       display("could not notify sidecar (#{error.message}); actions are OFF locally")
     end
+  end
+
+  def self.set_full_access(enabled)
+    @full_access = enabled == true
+    set_script_status('lab-access', @full_access ? 'full' : 'guarded')
+    publish_snapshot(force: true)
+    display(
+      @full_access ?
+        'full access ON for this Lich session; LAB may send single-line game commands' :
+        'full access OFF; LAB returned to the guarded command vocabulary'
+    )
+    @full_access
+  rescue => error
+    @full_access = false
+    set_script_status('lab-access', 'guarded')
+    display("full access remains OFF (#{error.message})")
+    false
   end
 
   # The sidecar keeps action authorization in memory.  Reconcile it while the
@@ -2692,6 +2714,22 @@ module LichAgentBridge
         Script.run('ebounty', nil, { quiet: true }) unless Script.running?('ebounty')
       elsif command.casecmp?('ebounty stop')
         Script.kill('ebounty') if Script.running?('ebounty')
+      elsif (direct_match = command.match(/\Alab direct ([^\r\n]{1,140})\z/i))
+        unless @full_access
+          report_action(action, 'failed', 'local full access is off')
+          return
+        end
+        game_command = direct_match[1].to_s.strip
+        if game_command.empty? || game_command.start_with?(',', ';') || game_command.match?(/[\r\n;|&]/)
+          report_action(action, 'failed', 'direct command is not one safe game-input line')
+          return
+        end
+        fput(game_command)
+        set_script_status('lab-direct', "completed:#{action.fetch(:action_id)}")
+        publish_snapshot(force: true)
+        report_action(action, 'completed', 'single game command delivered; game effect unverified')
+        display("executed full-access command [#{action.fetch(:action_id)}]: #{game_command}")
+        return
       elsif (controller_match = CONTROLLER_REGISTRY.match(command))
         execute_controller_action(action, controller_match)
         return
@@ -2761,7 +2799,7 @@ module LichAgentBridge
     request = command.to_s.strip
     case request.downcase
     when '', 'help'
-      display('usage: , QUESTION | ;lab status|state|scripts|inventory|last|alerts|sources|context|forget | ;lab do item audit #ID | ;lab do hunt prepare | ;lab do room loot | ;lab operation stop | ;lab actions on|off | ;lab approve [ID] | ;lab approve auto [off] | ;lab stop')
+      display('usage: , QUESTION | ;lab status|state|scripts|inventory|last|alerts|sources|context|forget | ;lab do item audit #ID | ;lab do hunt prepare | ;lab do room loot | ;lab operation stop | ;lab actions on|off | ;lab full access on|off | ;lab approve [ID] | ;lab approve auto [off] | ;lab stop')
       display('recovery: ;lab recover lists failed controlled outings; ;lab recover RUN_ID confirm verifies one safe handoff without changing its test result')
     when 'status'
       run_command_async { status }
@@ -2810,6 +2848,10 @@ module LichAgentBridge
       @pending_approval_id = nil
       @auto_approve = false
       run_command_async { set_actions(false) }
+    when 'full access on', 'full-access on'
+      run_command_async { set_full_access(true) }
+    when 'full access off', 'full-access off'
+      run_command_async { set_full_access(false) }
     when 'approve auto', 'approve auto on'
       @auto_approve = true
       display('auto-approve ON for allowlisted actions; use ;lab approve auto off to disable')
@@ -2873,6 +2915,7 @@ module LichAgentBridge
     @actions_enabled = false
     @pending_approval_id = nil
     @auto_approve = false
+    @full_access = false
     @command_queue << nil
     @sequence_response_mutex.synchronize { @sequence_response_cv.broadcast }
     UpstreamHook.remove(UPSTREAM_HOOK)

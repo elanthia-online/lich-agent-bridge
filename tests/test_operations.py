@@ -244,6 +244,12 @@ class BrokerDriver:
                     **dict(self.state.script_status or {}),
                     "eloot": f"completed:{action['action_id']}",
                 }
+            elif command.startswith("lab direct "):
+                self.state.sequence += 1
+                self.state.script_status = {
+                    **dict(self.state.script_status or {}),
+                    "lab-direct": f"completed:{action['action_id']}",
+                }
         broker.record_result(
             ActionResult(
                 action_id=action["action_id"],
@@ -301,6 +307,7 @@ class CapabilityRunnerTests(unittest.TestCase):
                 "item.audit",
                 "hunt.prepare",
                 "room.loot",
+                "session.command",
                 "controller.engage",
                 "controller.room",
                 "controller.hunt",
@@ -319,6 +326,58 @@ class CapabilityRunnerTests(unittest.TestCase):
             catalog["item.audit"]["arguments"]["properties"]["methods"]["items"]["enum"],
             list(SUPPORTED_ITEM_AUDIT_METHODS),
         )
+
+    def test_session_command_requires_local_full_access_and_verifies_delivery(self):
+        self.state.fresh = True
+        self.state.sequence = 10
+        self.state.dead = False
+        self.state.stunned = False
+        self.state.hands = {"right": None, "left": None}
+        self.state.scripts = ()
+        self.state.owners = {
+            "movement": None,
+            "combat": None,
+            "inventory": None,
+            "communication": None,
+        }
+        self.state.script_status = {"lab-access": "full"}
+
+        result = self.runner.perform(
+            "Testmage",
+            "session.command",
+            {"command": "join Calvix"},
+            expected_generation="generation-1",
+        )
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(self.driver.commands, ["lab direct join Calvix"])
+        self.assertIn("delivery", result.explanation)
+
+    def test_session_command_fails_before_dispatch_without_local_full_access(self):
+        self.state.fresh = True
+        self.state.sequence = 10
+        self.state.dead = False
+        self.state.stunned = False
+        self.state.hands = {"right": None, "left": None}
+        self.state.scripts = ()
+        self.state.owners = {
+            "movement": None,
+            "combat": None,
+            "inventory": None,
+            "communication": None,
+        }
+        self.state.script_status = {"lab-access": "guarded"}
+
+        result = self.runner.perform(
+            "Testmage",
+            "session.command",
+            {"command": "join Calvix"},
+            expected_generation="generation-1",
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("full access", result.explanation)
+        self.assertEqual(self.driver.commands, [])
 
     def test_terminal_operation_records_end_to_end_timing(self):
         recorded = []

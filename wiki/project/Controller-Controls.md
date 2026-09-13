@@ -345,6 +345,21 @@ Recovery sends no game commands, cancels no scripts, renews no action authority,
 and does not change the original test result or remove its failure alerts.
 It acknowledges restored safety, not successful execution of the failed test.
 
+## Exploratory game commands
+
+An unfamiliar game verb does not require a temporary controller profile. After
+the player enters `;lab full access on` in the owning character's Lich session,
+the generic `session.command` capability may deliver one game-input line. This
+is intended for supervised exploration such as regrouping characters or probing
+a room state before the behavior is stable enough to deserve a typed capability.
+
+The grant cannot be enabled remotely. The command remains generation-bound,
+expiring, serialized and audited, and the native bridge checks the local grant
+again immediately before delivery. Client/Lich commands, multiline input and
+command chaining are rejected. Completion proves delivery only; callers must
+read subsequent state or events before claiming the game performed the action.
+Use `;lab full access off` when exploration ends.
+
 ## Verification boundary
 
 Tests use the production schemas, ActionBroker, CapabilityRunner, Ruby bridge
