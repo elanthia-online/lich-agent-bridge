@@ -156,6 +156,34 @@ def publish_controller_result(
     )
 
 
+def publish_controller_recovery(
+    world,
+    *,
+    action_id="0123456789abcdef",
+    controller="hunt",
+    generation="generation-2",
+):
+    return world.publish_event(
+        MeaningfulEvent.from_mapping(
+            {
+                "character": "Testmage",
+                "generation": generation,
+                "observed_at": "2026-08-31T12:00:03Z",
+                "kind": "controller_recovery",
+                "summary": "Synthetic operator recovery",
+                "data": {
+                    "controller": controller,
+                    "action_id": action_id,
+                    "previous_generation": "generation-1",
+                    "operator_confirmed": True,
+                    "room_id": "1000",
+                    "hands": {"left": None, "right": "777"},
+                },
+            }
+        )
+    )
+
+
 class BrokerDriver:
     def __init__(self, world, *, mismatch=False, replace_generation=False):
         self.world = world
@@ -272,6 +300,33 @@ class SessionHubTests(unittest.TestCase):
         self.assertEqual(evidence.facts["code"], "returned")
         self.assertEqual(evidence.facts["details"], {"room_id": 8667})
 
+    def test_recovery_receipt_reader_is_exact_and_prefers_newest_event(self):
+        adapter = WorldStateEvidenceAdapter(self.world)
+        publish_snapshot(self.world, generation="generation-2", sequence=1)
+        publish_controller_recovery(self.world, controller="old")
+        publish_controller_recovery(self.world, controller="quick")
+        publish_controller_recovery(
+            self.world,
+            action_id="ffffffffffffffff",
+            controller="wrong-action",
+        )
+
+        receipt = adapter.controller_recovery_receipt(
+            character="Testmage",
+            generation="generation-2",
+            action_id="0123456789abcdef",
+        )
+
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["controller"], "quick")
+        self.assertIsNone(
+            adapter.controller_recovery_receipt(
+                character="Testmage",
+                generation="generation-3",
+                action_id="0123456789abcdef",
+            )
+        )
+
     def test_inventory_and_wiki_return_compact_provenance_envelopes(self):
         hub = self.hub()
         inventory = hub.inventory_find({"character": "Testmage", "query": "staff"})
@@ -292,7 +347,7 @@ class SessionHubTests(unittest.TestCase):
         result = hub.capability_catalog({"character": "Testknight"})
 
         self.assertEqual(result["character"], "Testknight")
-        self.assertEqual(result["total"], 6)
+        self.assertEqual(result["total"], 7)
         self.assertFalse(any(item["name"].startswith("controller.") for item in result["items"]))
         self.assertEqual(
             {item["name"] for item in result["items"]},
@@ -302,6 +357,7 @@ class SessionHubTests(unittest.TestCase):
                 "item.audit",
                 "hunt.prepare",
                 "room.loot",
+                "session.recover_controller",
                 "session.command",
             },
         )

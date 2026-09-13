@@ -1,3 +1,4 @@
+import re
 import threading
 import time
 import unittest
@@ -127,6 +128,8 @@ class FakeEvidence:
         self.registrations = []
         self.fail_methods = set()
         self.controller_result = None
+        self.controller_recovery_result = None
+        self.controller_recovery_receipt_result = None
 
     def register(self, operation_id, method, binding):
         token = (operation_id, method, binding.generation, binding.object_id)
@@ -164,6 +167,12 @@ class FakeEvidence:
             facts=dict(result),
             action_id=action_id,
         )
+
+    def verify_controller_recovery(self, **_details):
+        return self.controller_recovery_result
+
+    def controller_recovery_receipt(self, **_details):
+        return self.controller_recovery_receipt_result
 
 
 class BrokerDriver:
@@ -244,6 +253,8 @@ class BrokerDriver:
                     **dict(self.state.script_status or {}),
                     "eloot": f"completed:{action['action_id']}",
                 }
+            elif re.fullmatch(r"lab recover [0-9a-f]{16} confirm", command):
+                self.state.sequence += 1
             elif command.startswith("lab direct "):
                 self.state.sequence += 1
                 self.state.script_status = {
@@ -307,6 +318,7 @@ class CapabilityRunnerTests(unittest.TestCase):
                 "item.audit",
                 "hunt.prepare",
                 "room.loot",
+                "session.recover_controller",
                 "session.command",
                 "controller.engage",
                 "controller.room",

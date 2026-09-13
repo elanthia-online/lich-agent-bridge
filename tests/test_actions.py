@@ -637,6 +637,24 @@ class CommandPolicyTests(unittest.TestCase):
         self.assertEqual(normalized, "ready weapon #152828719")
         self.assertTrue(decision.confirmation_required)
 
+    def test_exact_controller_recovery_is_brokered_and_requires_confirmation(self):
+        command = "lab recover 0123456789abcdef confirm"
+        normalized, decision = CommandPolicy().evaluate(command)
+        self.assertEqual(normalized, command)
+        self.assertEqual(decision.kind, "configuration")
+        self.assertTrue(decision.confirmation_required)
+
+    def test_controller_recovery_rejects_broad_or_malformed_commands(self):
+        for command in (
+            "lab recover",
+            "lab recover all confirm",
+            "lab recover 0123456789abcde confirm",
+            "lab recover 0123456789abcdef",
+            "lab recover 0123456789abcdef confirm extra",
+        ):
+            with self.subTest(command=command), self.assertRaises(ValidationError):
+                CommandPolicy().evaluate(command)
+
 
 class ActionTokenTests(unittest.TestCase):
     def test_token_is_created_once_with_private_permissions(self):

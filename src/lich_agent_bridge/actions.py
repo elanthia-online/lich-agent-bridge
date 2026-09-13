@@ -362,6 +362,7 @@ class CommandPolicy:
         r"diagnose item (?:405|735) exact [^\r\n]{1,120})\Z"
     )
     _MIRACLE_TELEPORT = re.compile(r"\Abeseech teleport\Z")
+    _SESSION_RECOVERY = re.compile(r"\Alab recover [0-9a-f]{16} confirm\Z")
     _DIRECT_COMMAND = re.compile(r"\Alab direct ([^\r\n]{1,140})\Z", re.IGNORECASE)
     _ELOOT_CURRENT_ROOM = re.compile(r"\Aeloot loot\Z")
     _READ_ONLY = re.compile(
@@ -459,6 +460,8 @@ class CommandPolicy:
             return collapsed, PolicyDecision("inspection", False)
         if self._READ_ONLY.fullmatch(folded):
             return collapsed, PolicyDecision("inspection", False)
+        if self._SESSION_RECOVERY.fullmatch(folded):
+            return folded, PolicyDecision("configuration", True)
         if any(pattern.fullmatch(folded) for pattern in self._CONFIGURATION):
             return folded, PolicyDecision("configuration", True)
         if any(pattern.fullmatch(folded) for pattern in self._MOVEMENT):

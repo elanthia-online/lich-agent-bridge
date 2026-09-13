@@ -323,7 +323,11 @@ transport compatibility, not live combat behavior.
 `;lab recover` lists retained native Quick handoff failures for the current
 character. After manually restoring the character, the player can use
 `;lab recover RUN_ID confirm` with the displayed 16-character launch action ID.
-There is no blanket reset and no advertised model capability for confirmation.
+There is no blanket reset. The narrow `session.recover_controller` capability
+accepts only the displayed action ID plus `confirm: true`, requires the current
+expected session generation, and is intended only when the player has explicitly
+authorized that acknowledgement. It passes the exact recovery request through
+the ordinary action broker; it is not a general remote script-command path.
 
 The bridge verifies that exact child and monitor have exited, the current
 character is alive, unstunned and standing in the run's original refuge, both
@@ -340,6 +344,15 @@ the same explicit command can republish a lost/expired receipt. LAB requires a
 matching receipt plus fresh safe current state before clearing its old-generation
 exclusion during the next admission. A receipt by itself is not current safety;
 an evicted receipt must be explicitly republished, never guessed.
+
+For brokered recovery, the Python runner first matches the action ID against its
+own retained pending handoff. The owning Ruby session then repeats the native
+checks and publishes the receipt. The runner requires a fresh post-action
+snapshot, matching receipt, original hands, refuge, survival and released lanes
+before clearing its exclusion. Either side refusing leaves the handoff pending.
+After a sidecar restart there may be no Python pending tuple to clear. The native
+run still owns the failure ledger; its authenticated exact-ID receipt reconstructs
+only the bounded verification fields needed for the same current-state checks.
 
 Recovery sends no game commands, cancels no scripts, renews no action authority,
 and does not change the original test result or remove its failure alerts.
