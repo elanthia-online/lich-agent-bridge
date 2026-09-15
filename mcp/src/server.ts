@@ -54,7 +54,7 @@ export function createApp(config: AdapterConfig) {
     server.registerTool(
       'lab.execute_code',
       {
-        description: `Execute bounded TypeScript against the isolated LAB SDK. Use for dependent reads, compact aggregation, or reads followed by at most one perform or stop. Long watches must use direct lab.watch.\n${SDK_TYPE_DECLARATIONS}`,
+        description: `Execute bounded TypeScript against the isolated LAB SDK: at most 20 total calls and 8 mutation attempts (perform/stop), default 10s, opt-in maximum 30s. Await dependent operations; Promise.all supports independent characters. Existing per-character busy, generation, broker and native access gates apply to every request. A batch is not atomic; no retries or rollback. Failed or ambiguous mutations block further performs, while reads, operationWatch and exact stop remain available within budget. Steps retain operation IDs/status and unconfirmed admission; success reports execution/transport, not verified game effects. Await all mutations. Ending execution closes dispatch but cannot unsend requests or cancel admitted operations. Isolate watches cap at 1000ms; use direct lab.watch/lab.operation_watch for longer waits and direct lab.stop after budget exhaustion.\n${SDK_TYPE_DECLARATIONS}`,
         inputSchema: EXECUTE_CODE_INPUT,
         annotations: {
           readOnlyHint: false,

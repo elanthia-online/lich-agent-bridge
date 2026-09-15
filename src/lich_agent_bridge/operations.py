@@ -19,7 +19,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
-from .actions import ActionBroker, ActionProposal
+from .actions import ActionBroker, ActionProposal, normalize_full_access_command
 from .controller_manifest import CONTROLLER_CONTROLS, ControllerDefinition, ControllerManifest
 from .errors import ValidationError
 from .script_adapters import BIGSHOT_ADAPTER, ELOOT_ADAPTER, GO2_ADAPTER, ScriptAdapter
@@ -122,7 +122,7 @@ CAPABILITY_DEFINITIONS = (
     ),
     CapabilityDefinition(
         name="session.command",
-        summary="Send one game command through a locally enabled full-access session; delivery is verified but the game effect is not inferred.",
+        summary="Send one game-input or Lich script command through a locally enabled full-access session; delivery is verified but the effect is not inferred.",
         arguments={
             "type": "object",
             "properties": {
@@ -1186,15 +1186,10 @@ class CapabilityRunner:
         if set(operation.arguments) != {"command"}:
             raise _OperationAbort("failed", "session.command accepts only command")
         command = operation.arguments.get("command")
-        if not isinstance(command, str):
-            raise _OperationAbort("failed", "command must be a string")
-        command = command.strip()
-        if not command or len(command) > 140:
-            raise _OperationAbort("failed", "command must contain 1 to 140 characters")
-        if any(character in command for character in ("\x00", "\r", "\n", ";", "|", "&")):
-            raise _OperationAbort("failed", "command chaining or control characters are forbidden")
-        if command.startswith(","):
-            raise _OperationAbort("failed", "client commands are not game commands")
+        try:
+            command = normalize_full_access_command(command)
+        except ValidationError as error:
+            raise _OperationAbort("failed", str(error)) from error
 
         start = self._require_fresh_session(operation)
         operation.start_state = start
@@ -1203,13 +1198,13 @@ class CapabilityRunner:
         self._admit_and_start(
             operation,
             admitted_detail="local full-access grant and current session admitted",
-            running_detail="single game-command delivery running",
+            running_detail="single session-command delivery running",
         )
         action = self._run_broker_step(
             operation,
             start,
             f"lab direct {command}",
-            "sending locally authorized game command",
+            "sending locally authorized session command",
         )
         end = self._require_fresh_session(
             operation,
@@ -1218,9 +1213,9 @@ class CapabilityRunner:
         )
         expected_status = f"completed:{action['action_id']}"
         if not isinstance(end.script_status, Mapping) or end.script_status.get("lab-direct") != expected_status:
-            raise _OperationAbort("failed", "native game-command delivery receipt was not observed")
+            raise _OperationAbort("failed", "native session-command delivery receipt was not observed")
         operation.end_state = end
-        return "native session verified command delivery; game effect remains unverified"
+        return "native session verified command delivery; requested effect remains unverified"
 
     @staticmethod
     def _validate_recovery_candidate_start(snapshot: SessionState) -> None:

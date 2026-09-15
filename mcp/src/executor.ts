@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
@@ -10,6 +11,7 @@ import type { SessionHubCaller } from './session-hub-client.js';
 export const EXECUTOR_LIMITS = Object.freeze({
   maxCodeBytes: 20 * 1024,
   timeoutMs: 10_000,
+  maxTimeoutMs: 30_000,
   memoryMb: 8,
   maxCalls: 20,
   maxConcurrent: 2,
@@ -66,7 +68,7 @@ export async function executeCode(
   client: SessionHubCaller,
   options: { timeout_ms?: number } = {},
 ): Promise<ExecutionResult> {
-  const started = Date.now();
+  const started = performance.now();
   const operationId = `op-${randomUUID()}`;
   const logs: string[] = [];
   const state: BridgeState = { operationId, performCalls: 0, steps: [] };
@@ -81,8 +83,8 @@ export async function executeCode(
     operation_id: operationId,
     logs,
     lab_calls: callCount,
-    steps: state.steps,
-    execution_time_ms: Date.now() - started,
+    steps: state.steps.map((step) => ({ ...step })),
+    execution_time_ms: performance.now() - started,
     startup_time_ms: startupTimeMs,
   });
 
@@ -99,51 +101,62 @@ export async function executeCode(
   }
   activeByConnection.set(connectionId, active + 1);
 
-  const timeoutMs = Math.max(1, Math.min(options.timeout_ms ?? EXECUTOR_LIMITS.timeoutMs, EXECUTOR_LIMITS.timeoutMs));
+  const timeoutMs = Math.max(1, Math.min(options.timeout_ms ?? EXECUTOR_LIMITS.timeoutMs, EXECUTOR_LIMITS.maxTimeoutMs));
   const bridge = createBridge(client, state);
   let child: ChildProcessWithoutNullStreams | undefined;
   try {
     return await new Promise<ExecutionResult>((resolve) => {
       child = spawn(process.execPath, [childPath()], { stdio: ['pipe', 'pipe', 'pipe'], env: {} });
-      const spawnedAt = Date.now();
+      const spawnedAt = performance.now();
       const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
       let settled = false;
       let inFlightCalls = 0;
       let pendingResult: { success: boolean; result?: unknown; error?: string } | undefined;
       let executionTimer: NodeJS.Timeout | undefined;
+      let executionDeadline: number | undefined;
       const write = (message: object) => {
         if (!settled && child?.stdin.writable) child.stdin.write(`${JSON.stringify(message)}\n`);
       };
       const done = (result: { success: boolean; result?: unknown; error?: string }) => {
         if (settled) return;
+        state.closed = true;
         settled = true;
         clearTimeout(bootTimer);
         if (executionTimer) clearTimeout(executionTimer);
         lines.close();
         try { child?.stdin.write(`${JSON.stringify({ type: 'shutdown' })}\n`); } catch {}
         try { child?.kill(); } catch {}
-        resolve(finish(result));
+        resolve(finish(result.success && state.mutationFailure
+          ? { ...result, success: false, error: state.mutationFailure }
+          : result));
       };
       const completePendingResult = () => {
         if (pendingResult && inFlightCalls === 0) done(pendingResult);
       };
+      const fail = (error: string) => {
+        state.closed = true;
+        pendingResult = { success: false, error };
+        completePendingResult();
+      };
       const bootTimer = setTimeout(() => done({ success: false, error: 'Executor child failed to boot' }), EXECUTOR_LIMITS.bootTimeoutMs);
 
       child.stderr.on('data', () => { /* child diagnostics intentionally stay out of MCP output */ });
-      child.on('error', (error) => done({ success: false, error: `Executor child failed: ${error.message}` }));
+      child.on('error', (error) => fail(`Executor child failed: ${error.message}`));
       child.on('close', (code) => {
-        if (!settled) done({ success: false, error: `Executor child exited before a result (code ${code ?? 'unknown'})` });
+        if (!settled && !pendingResult) fail(`Executor child exited before a result (code ${code ?? 'unknown'})`);
       });
       lines.on('line', (line) => {
+        if (settled || state.closed) return;
         let message: Record<string, unknown>;
         try { message = JSON.parse(line) as Record<string, unknown>; }
         catch { return; }
         if (message.type === 'ready') {
-          startupTimeMs = Date.now() - spawnedAt;
+          startupTimeMs = performance.now() - spawnedAt;
           clearTimeout(bootTimer);
+          executionDeadline = performance.now() + timeoutMs;
           executionTimer = setTimeout(
             () => done({ success: false, error: `Execution timed out after ${timeoutMs}ms` }),
-            timeoutMs + 1_000,
+            timeoutMs,
           );
           write({
             type: 'execute',
@@ -161,6 +174,10 @@ export async function executeCode(
           return;
         }
         if (message.type === 'lab_call') {
+          if (executionDeadline === undefined || performance.now() >= executionDeadline) {
+            done({ success: false, error: `Execution timed out after ${timeoutMs}ms` });
+            return;
+          }
           callCount += 1;
           const callId = String(message.call_id);
           const method = String(message.method);
@@ -168,7 +185,7 @@ export async function executeCode(
             const error = `Maximum ${EXECUTOR_LIMITS.maxCalls} lab.* calls per execution exceeded`;
             state.steps.push({ step_id: state.steps.length + 1, tool: `lab.${method}`, success: false, error });
             write({ type: 'lab_result', call_id: callId, result_json: JSON.stringify({ __lab_thrown: true, message: error }) });
-            done({ success: false, error });
+            fail(error);
             return;
           }
           inFlightCalls += 1;
@@ -197,13 +214,17 @@ export async function executeCode(
           return;
         }
         if (message.type === 'result' && typeof message.result_json === 'string') {
+          state.closed = true;
           try { pendingResult = { success: true, result: JSON.parse(message.result_json) }; }
           catch { pendingResult = { success: false, error: 'Executor returned invalid JSON' }; }
+          if (message.unawaited_mutations === true || state.steps.some((step) => step.dispatch_status === 'unconfirmed' && !step.error)) {
+            pendingResult = { ...pendingResult, success: false, error: 'Execution ended with an unawaited mutation; inspect operation receipts before continuing' };
+          }
           completePendingResult();
           return;
         }
         if (message.type === 'error') {
-          done({ success: false, error: classifyError(String(message.message), timeoutMs) });
+          fail(classifyError(String(message.message), timeoutMs));
         }
       });
     });

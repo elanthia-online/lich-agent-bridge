@@ -21,16 +21,21 @@ test('test perform and exact stop preserve session fences', async () => {
   assert.equal(calls.length, 2);
 });
 
-test('isolated executor shares one mutation allowance across perform and stop', async () => {
+test('isolated executor shares eight mutation attempts across perform and exact stop', async () => {
   let calls = 0;
-  const hub: SessionHubCaller = { async call() { calls++; return {}; } };
+  const hub: SessionHubCaller = { async call(route, payload) {
+    calls++;
+    return route === 'perform'
+      ? { operation_id: `ticket-${calls}`, status: 'succeeded' }
+      : { character: payload.character, operation_id: payload.operation_id, stopped: false };
+  } };
   for (const methods of [['perform', 'stop'], ['stop', 'perform'], ['stop', 'stop']]) {
     const bridge = createBridge(hub, { operationId: 'op-test', performCalls: 0, steps: [] });
     const params = (method: string) => method === 'perform'
       ? { character: 'Testmage', capability: 'controller.test-probe' }
       : { character: 'Testmage', operation_id: 'op-test', expected_generation: 'generation-test' };
-    await bridge.call(methods[0], params(methods[0]));
-    await assert.rejects(bridge.call(methods[1], params(methods[1])), /At most one/);
+    for (let i = 0; i < 8; i++) await bridge.call(methods[i % 2], params(methods[i % 2]));
+    await assert.rejects(bridge.call(methods[1], params(methods[1])), /At most 8 mutation attempts/);
   }
-  assert.equal(calls, 3);
+  assert.equal(calls, 24);
 });

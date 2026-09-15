@@ -1158,8 +1158,6 @@ module LichAgentBridge
     unless enabled
       @pending_approval_id = nil
       @auto_approve = false
-      @full_access = false
-      set_script_status('lab-access', 'guarded')
     end
     body = action_request(
       '/v1/actions/control',
@@ -1177,20 +1175,57 @@ module LichAgentBridge
     end
   end
 
+  def self.full_access_settings
+    Lich::Common::Settings
+  end
+
+  def self.full_access_scope
+    game = XMLData.game.to_s
+    name = character_name
+    raise 'character identity unavailable' if game.empty? || name == 'Unknown'
+
+    "#{game}:#{name}"
+  end
+
+  # Character policy uses the native settings store, never a hunting profile
+  # or a sidecar request. Missing/malformed settings retain guarded access.
+  def self.restore_full_access
+    @full_access = full_access_settings.get_scoped_setting(
+      full_access_scope, 'full_access', script_name: 'lab'
+    ) == true
+    set_script_status('lab-access', @full_access ? 'full' : 'guarded')
+    display('saved full access ON; use ;lab full access off to disable persistently') if @full_access
+    @full_access
+  rescue => error
+    @full_access = false
+    set_script_status('lab-access', 'guarded')
+    display("saved full access unavailable; remaining guarded (#{error.message})")
+    false
+  end
+
   def self.set_full_access(enabled)
+    # Revocation takes effect locally even when the settings write fails.
+    @full_access = false
+    set_script_status('lab-access', 'guarded')
+    scope = full_access_scope
+    settings = full_access_settings.current_script_settings(scope, script_name: 'lab')
+    raise 'invalid LAB settings' unless settings.is_a?(Hash)
+
+    settings = settings.merge('full_access' => enabled == true)
+    full_access_settings.save_to_database(settings, scope, script_name: 'lab')
     @full_access = enabled == true
     set_script_status('lab-access', @full_access ? 'full' : 'guarded')
     publish_snapshot(force: true)
     display(
       @full_access ?
-        'full access ON for this Lich session; LAB may send single-line game commands' :
-        'full access OFF; LAB returned to the guarded command vocabulary'
+        'full access ON and saved for this character; LAB may send single-line game commands' :
+        'full access OFF and saved; LAB returned to the guarded command vocabulary'
     )
     @full_access
   rescue => error
     @full_access = false
     set_script_status('lab-access', 'guarded')
-    display("full access remains OFF (#{error.message})")
+    display("full access is OFF locally; saving or publishing failed (#{error.message}); check the saved preference before restarting")
     false
   end
 
@@ -1245,8 +1280,38 @@ module LichAgentBridge
   def self.safe_action_command?(command)
     text = command.to_s
     return false if FORBIDDEN_ACTIONS.any? { |pattern| pattern.match?(text) }
+    if (direct_match = text.match(/\Alab direct ([^\r\n]{1,140})\z/i))
+      return safe_direct_command?(direct_match[1])
+    end
 
     SAFE_ACTIONS.any? { |pattern| pattern.match?(text) }
+  end
+
+  DIRECT_LICH_EVAL_COMMANDS = %w[e eq exec execq en execname].freeze
+
+  def self.safe_direct_command?(command)
+    text = command.to_s.strip
+    return false if text.empty? || text.length > 140
+    return false if text.match?(/[\x00\r\n|&]/) || text.start_with?(',')
+
+    if text.start_with?(';')
+      return false if text[1..].include?(';')
+      lich_command = text[1..].to_s.strip
+      return false if lich_command.empty?
+
+      verb = lich_command.split(/\s+/, 2).first.to_s.downcase
+      return false if DIRECT_LICH_EVAL_COMMANDS.include?(verb)
+
+      true
+    else
+      !text.include?(';')
+    end
+  end
+
+  # Use Lich's canonical client-command parser so lifecycle commands and script
+  # arguments retain the same semantics as commands entered by the player.
+  def self.dispatch_lich_client_command(command)
+    do_client(command)
   end
 
   def self.safe_sequence_command?(command)
@@ -2765,16 +2830,20 @@ module LichAgentBridge
           report_action(action, 'failed', 'local full access is off')
           return
         end
-        game_command = direct_match[1].to_s.strip
-        if game_command.empty? || game_command.start_with?(',', ';') || game_command.match?(/[\r\n;|&]/)
-          report_action(action, 'failed', 'direct command is not one safe game-input line')
+        direct_command = direct_match[1].to_s.strip
+        unless safe_direct_command?(direct_command)
+          report_action(action, 'failed', 'direct command is not one accepted session-input line')
           return
         end
-        fput(game_command)
+        if direct_command.start_with?(';')
+          dispatch_lich_client_command(direct_command)
+        else
+          fput(direct_command)
+        end
         set_script_status('lab-direct', "completed:#{action.fetch(:action_id)}")
         publish_snapshot(force: true)
-        report_action(action, 'completed', 'single game command delivered; game effect unverified')
-        display("executed full-access command [#{action.fetch(:action_id)}]: #{game_command}")
+        report_action(action, 'completed', 'single session command delivered; effect unverified')
+        display("executed full-access command [#{action.fetch(:action_id)}]: #{direct_command}")
         return
       elsif (controller_match = CONTROLLER_REGISTRY.match(command))
         execute_controller_action(action, controller_match)
@@ -2971,6 +3040,7 @@ end
 
 unless ENV['LAB_BRIDGE_LIBRARY_ONLY'] == '1'
   before_dying { LichAgentBridge.stop }
+  LichAgentBridge.restore_full_access
   UpstreamHook.add(LichAgentBridge::UPSTREAM_HOOK, proc { |line| LichAgentBridge.handle_input(line) }, persist: false)
   DownstreamHook.add(LichAgentBridge::DOWNSTREAM_HOOK, proc { |line| LichAgentBridge.capture(line) }, persist: false)
   Thread.new { LichAgentBridge.command_loop }
