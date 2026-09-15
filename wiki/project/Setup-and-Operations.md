@@ -87,6 +87,13 @@ Action execution and allowlisted auto-approval currently start enabled.
 `;lab actions off` prevents command execution while retaining conversation;
 `;lab stop` exits the bridge. Review [Safety](Safety.md) before enabling actions.
 
+For supervised exploratory commands, `;lab full access on` saves an opt-in
+for the current game/character. LAB restores it on restart and relog; the startup
+message announces saved full access. `;lab full access off` saves guarded mode.
+No setting means guarded mode. This does not persist in-flight operations or
+change the separate actions switch. After upgrading an already running bridge,
+restart LAB and enter the preferred setting once with the updated code.
+
 ## Optional services and MCP
 
 The user-service installer renders templates using the current clone and

@@ -365,6 +365,34 @@ class CapabilityRunnerTests(unittest.TestCase):
         self.assertEqual(self.driver.commands, ["lab direct join Calvix"])
         self.assertIn("delivery", result.explanation)
 
+    def test_session_command_accepts_one_lich_script_command(self):
+        self.state.fresh = True
+        self.state.sequence = 10
+        self.state.dead = False
+        self.state.stunned = False
+        self.state.hands = {"right": None, "left": None}
+        self.state.scripts = ()
+        self.state.owners = {
+            "movement": None,
+            "combat": None,
+            "inventory": None,
+            "communication": None,
+        }
+        self.state.script_status = {"lab-access": "full"}
+
+        result = self.runner.perform(
+            "Testmage",
+            "session.command",
+            {"command": ";eohunter Leveling-Trio dry"},
+            expected_generation="generation-1",
+        )
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(
+            self.driver.commands,
+            ["lab direct ;eohunter Leveling-Trio dry"],
+        )
+
     def test_session_command_fails_before_dispatch_without_local_full_access(self):
         self.state.fresh = True
         self.state.sequence = 10

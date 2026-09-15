@@ -65,6 +65,7 @@ jobs:
           ruby tests/lab_bridge_test.rb
           ruby tests/lab_combat_report_test.rb
           ruby tests/lab_go2_travel_test.rb
+          ruby tests/lab_full_access_test.rb
           ruby tests/lab_recovery_test.rb
           ruby tests/despana_state_test.rb
           ruby tests/lab_controller_registry_test.rb

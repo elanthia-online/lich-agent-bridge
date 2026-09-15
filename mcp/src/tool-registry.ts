@@ -121,7 +121,7 @@ export const DIRECT_TOOLS = Object.values(DIRECT_TOOL_REGISTRY);
 
 export const EXECUTE_CODE_INPUT = z.strictObject({
   code: z.string().min(1).describe('TypeScript function-body code. Use await lab.* and return a JSON-serializable result.'),
-  timeout_ms: z.number().int().min(1).max(10_000).optional().describe('Execution timeout in milliseconds; default and maximum are 10000.'),
+  timeout_ms: z.number().int().min(1).max(30_000).optional().describe('Execution timeout in milliseconds; default 10000, opt-in maximum 30000. Does not extend native operation authority.'),
 });
 
 export function entryByToolName(name: string): DirectToolEntry | undefined {
