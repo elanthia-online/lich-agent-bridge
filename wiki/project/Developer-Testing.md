@@ -37,6 +37,25 @@ all multi-target, group, or delayed-effect cases in live play.
 
 ## Start with an isolated reproduction
 
+### MCP compiler dependencies
+
+The MCP build and typecheck commands use TypeScript 7 (`typescript`, a development
+dependency). The executor compiles submitted TypeScript using the separate
+`@typescript/typescript6` runtime dependency: TypeScript 7.0 does not expose the
+legacy `transpileModule` API. Keep these roles separate when updating packages.
+Build scripts explicitly select `typescript/bin/tsc` because the compatibility
+package's transitive compiler can shadow the generic `.bin/tsc` executable.
+This follows the [upstream compatibility guidance](https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/#running-side-by-side-with-typescript-6.0).
+
+Run `npm ci`, `npm test`, `npm run typecheck`, `npm run check:sdk-types`, and
+`npm run build` from `mcp/`. The executor tests exercise valid typed code, rejected
+syntax, emitted enums and awaited SDK calls through the real compiler and
+isolated execution path. A successful CLI build alone does not verify the runtime
+compiler. Production-only installs must retain the compatibility package, even
+when the build compiler is omitted. No game connection is needed for these tests.
+
+### Synthetic observations first
+
 Use the Python state, policy, operation, and HTTP tests plus the Ruby fake-Lich
 harnesses before a live test. They exercise malformed input, state generations,
 unknown identifiers, ownership conflicts, timeouts, rejection, and kill switches
