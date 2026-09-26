@@ -1,4 +1,5 @@
 import copy
+import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from threading import Event, Thread
@@ -71,7 +72,7 @@ class EvidenceToolsTest(unittest.TestCase):
 
     def test_catalog_is_copy_and_only_reusable_observation_tools(self):
         catalog = self.session.catalog()
-        self.assertEqual({tool["name"] for tool in catalog}, {"state.read", "character.read", "inventory.search", "knowledge.search"})
+        self.assertEqual({tool["name"] for tool in catalog}, {"state.read", "character.read", "inventory.search", "knowledge.search", "combat.report"})
         catalog[0]["name"] = "commands.run"
         self.assertEqual(self.session.catalog()[0]["name"], "state.read")
 
@@ -302,6 +303,55 @@ class EvidenceToolsTest(unittest.TestCase):
         self.assertEqual(len(result["sources"]), 1)
         self.assertEqual(result["sources"][0]["revision_id"], "234211")
 
+    def test_default_provider_budget_retains_complete_long_mechanics_record(self):
+        record = {"source": "local_gswiki", "title": "Synthetic mechanics", "revision_id": "2",
+                  "text": "COMPLETE-MECHANICS " + "x" * 7000}
+        self.hub.wiki_search = lambda _: {"items": [record], "total": 1}
+        result = self.execute("knowledge.search", {"query": "synthetic mechanics"})
+        self.assertEqual(len(result["data"]["items"]), 1)
+        self.assertEqual(result["data"]["items"][0], record)
+        self.assertEqual(result["sources"][0]["revision_id"], "2")
+
+    def test_configured_provider_budget_changes_complete_record_selection(self):
+        record = {"source": "local_gswiki", "title": "Synthetic mechanics", "revision_id": "2",
+                  "text": "COMPLETE-MECHANICS " + "x" * 13000}
+        self.hub.wiki_search = lambda _: {"items": [record], "total": 1}
+        for limit, included in ((6000, False), (18000, True)):
+            with self.subTest(limit=limit):
+                session = EvidenceTools(self.hub, max_result_chars=limit).open("Testmage", self.control)
+                self.addCleanup(session.close)
+                result = session.execute("knowledge.search", {"query": "mechanics"}, self.control)
+                self.assertEqual(result["data"]["items"], [record] if included else [])
+                self.assertEqual(len(result["sources"]), int(included))
+                self.assertLess(len(json.dumps(result, ensure_ascii=False)), limit)
+                if not included:
+                    self.assertEqual(result["status"], "partial")
+                    self.assertEqual(result["data"]["total"], 1)
+                    self.assertEqual(result["diagnostics"], [{"reason": "output_budget", "omitted_items": 1,
+                                                              "configured_data_limit_chars": limit - 1500}])
+
+    def test_omitted_inventory_is_partial_but_no_matches_remain_not_found(self):
+        record = {"dossier_id": "oversized", "facts": [{"text": "x" * (MAX_EVIDENCE_CHARS + 1)}]}
+        for items, expected in (([record], "partial"), ([], "not_found")):
+            with self.subTest(expected=expected):
+                self.hub.inventory_find = lambda _: {"items": items, "total": len(items)}
+                result = self.execute("inventory.search", {"query": "record"})
+                self.assertEqual(result["status"], expected)
+                self.assertEqual(result["data"]["total"], len(items))
+                self.assertEqual(result["data"]["items"], [])
+                self.assertEqual(result["sources"], [])
+                if items:
+                    self.assertEqual(result["diagnostics"][0]["omitted_items"], 1)
+
+    def test_no_knowledge_matches_remain_not_found(self):
+        self.hub.wiki_search = lambda _: {"items": [], "total": 0}
+        self.assertEqual(self.execute("knowledge.search", {"query": "absent"})["status"], "not_found")
+
+    def test_provider_budget_constructor_rejects_invalid_limits(self):
+        for limit in (True, "12000", 2999, 100001):
+            with self.subTest(limit=limit), self.assertRaises(ValueError):
+                EvidenceTools(self.hub, max_result_chars=limit)
+
     def test_state_budget_omits_whole_oversize_field_with_diagnostic(self):
         self.hub.state["room"]["description"] = "x" * (MAX_EVIDENCE_CHARS + 1)
         result = self.execute("state.read", {"sections": ["room"]})
@@ -328,7 +378,9 @@ class EvidenceToolsTest(unittest.TestCase):
             self.execute("knowledge.search", {"query": "706"})
 
     def test_output_budget_omits_large_character_category_truthfully(self):
-        self.hub.state["character_data"]["skills"]["values"]["skills"] = {str(i): {"ranks": i, "bonus": i * 2} for i in range(250)}
+        self.hub.state["character_data"]["skills"]["values"]["skills"] = {
+            str(i): {"ranks": i, "bonus": i * 2} for i in range(MAX_EVIDENCE_CHARS // 20)
+        }
         result = self.execute("character.read", {"categories": ["skills"]})
         self.assertEqual(result["status"], "partial")
         self.assertEqual(result["data"]["categories"], {})

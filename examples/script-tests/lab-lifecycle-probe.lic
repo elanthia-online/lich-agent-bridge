@@ -1,0 +1,16 @@
+# Harmless trusted-script pilot fixture. No game commands or state mutations.
+# Lich Script.current.vars[1..] contains the supplied argument tokens.
+# The intentional error is expected to make its CASE FAIL, verifying that the
+# runner distinguishes a raised exception from ordinary script completion.
+probe_owner = Script.current
+raise 'Lifecycle probe requires its owning Lich script' unless probe_owner
+
+probe_arguments = probe_owner.vars.drop(1)
+case probe_arguments
+when ['normal']
+  nil
+when ['error']
+  raise 'Intentional lifecycle-probe failure'
+else
+  raise 'Lifecycle probe accepts exactly normal or error'
+end

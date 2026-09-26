@@ -46,6 +46,15 @@ reenabling actions does not silently restore that standing delegation.
 `;lab stop` stops the bridge. These settings are independent of which model
 or profile is selected.
 
+Direct shell questions (`labctl ask` and `labctl questions`) default to a
+per-request read-only restriction, independently enforced by the evidence session.
+This blocks INFO/SKILLS even with global actions enabled. Explicit `--allow-recon`
+removes only that per-request restriction; the existing action, approval,
+ownership, and generation gates still apply. It grants no arbitrary commands.
+Testing remains player-authorized and sends private context to the configured
+backend. Read-only refers to game-command authority, not zero model cost or an
+absence of local dialogue/results writes.
+
 ## Protected operations
 
 Treat equipped, registered, high-value, unique, and user-protected items as
@@ -59,15 +68,118 @@ The driver denies dropping, external giving/trading, selling, destruction,
 unmarking, disabling protective drop flags, arbitrary scripts, and hidden command
 chains. Ordinary owned-inventory handling still requires the existing gates.
 
+The optional script-test pilot explicitly trusts locally reviewed, registered
+Ruby scripts and their declared dependencies. Their launch passes these gates,
+but code running inside Lich can issue commands independently: this is not a Ruby
+sandbox or per-command mediation of third-party scripts. The shipped probe sends
+no game commands. Approve only non-combat suites within the pilot's scope, review
+the pinned files and fixed parameters, and retain private configuration locally.
+Digests detect file changes but cannot eliminate concurrent local mutation or
+discover undeclared dynamic dependencies. Cleanup verifies owned-child exit;
+it cannot roll back arbitrary script side effects. Incomplete cleanup keeps a
+local exclusion and requires operator resolution before another run.
+
 Configure routine-resource limits privately. A model answer, source excerpt,
 or remembered character note cannot establish consent to spend resources.
 
 ## Safe handoff for local extensions
 
+### Agent-test safe start and return (required)
+
+Every agent-run test must begin in a player-configured safe waiting room and
+finish in a player-configured safe waiting room. A nearby refuge is sufficient;
+returning to town is not required. Profile membership, an empty room, high
+health, or an agent's assessment that nearby creatures are harmless does not
+establish that a room is safe. The player supplies the trusted refuge locations.
+
+Before leaving refuge, the test needs an explicit bounded return plan and a
+separate recovery allowance within its total deadline. Completing the test case,
+exhausting its work budget, or an ordinary test stop must end test work and
+initiate the authorized local return; a model round trip must not be needed.
+Explicit action revocation remains an immediate no-more-commands instruction:
+it must never silently authorize travel after the player has withdrawn authority.
+When revoked or unable to return, report an unsafe/incomplete handoff and alert
+the player. Never report success merely because the script exited.
+
+Success requires fresh same-session refuge arrival, survival, verified equipment
+handoff, and release of the exact owned work. Failure to return is a failed test
+with recovery incomplete, even if its combat assertions passed. Keep the
+unresolved handoff visible and deny a subsequent agent test until the player
+resolves it. Do not continue fighting or searching merely to finish a case.
+
+The supervised `quick_refuge` path enforces this rule. Its coordinated build
+still requires player-authorized live acceptance before routine testing resumes.
+The earlier experimental `quick_area` field-handoff exception is superseded:
+old registrations can load for migration but cannot launch Quick tests.
+Manually operated Bigshot Quick is not made dependent on LAB or this workflow.
+
+After a LAB generation change, only explicit operator confirmation may
+reconcile a retained native failure. The player may enter
+`;lab recover RUN_ID confirm`, or explicitly direct an agent to invoke the
+narrow `session.recover_controller` capability with that exact ID and
+`confirm: true`. The capability requires the current expected generation and
+passes through the ordinary action broker; it grants no general script-command
+access. The bridge requires exact child/monitor exit and fresh refuge, survival,
+posture, original equipment and owner-release checks. LAB requires the matching
+native receipt and independently rechecks current state. This restores
+eligibility, not execution authority, and never rewrites the failed test as a pass. See
+[player-confirmed recovery](Controller-Controls.md#player-confirmed-recovery-after-a-lab-restart).
+
+Direct `travel.go2` can perform separately authorized navigation or recovery
+without a combat launch. It uses existing native go2, exact child ownership,
+bounded authority and verified arrival. It does not override action revocation
+or declare an arbitrary destination safe. See [direct travel](Developer-Testing.md#direct-native-go2-travel).
+
+## Locally enabled exploratory access
+
+Guarded mode remains the default interface for routine use. During supervised
+exploratory testing, the player may enter `;lab full access on` in one owning
+Lich session. This exposes `session.command` for that character without requiring
+a predeclared profile or per-verb capability. The preference is local and saved
+through native Lich Settings under the `lab` namespace and exact game/character
+scope. It is restored before the bridge publishes startup state. Only literal
+boolean true enables it; missing, invalid or unreadable settings stay guarded.
+The sidecar cannot enable it through an operation request. Restoring a saved
+preference does not restore old requests, operation IDs or generation authority.
+
+The command still passes through the ordinary generation-bound, expiring,
+one-at-a-time broker and the native bridge rechecks the local grant immediately
+before sending it. One game-input line or one semicolon-prefixed Lich command is
+accepted. Lich commands go through Lich's native client dispatcher. Frontend
+commands, inline Ruby execution (`;e`, `;exec`, and aliases), newlines and command
+chaining remain rejected. Installed Lich scripts are trusted local Ruby code, not
+sandboxed plugins. A successful operation proves native delivery, not that the
+game or script performed the requested effect. Agents must use subsequent state
+or event evidence for consequential claims.
+
+`lab.execute_code` may compose multiple individually authorized operations. Its
+eight-mutation/twenty-call budget does not replace per-character broker ownership,
+freshness, generation, command or grant checks. A script may sequence operations
+with `await` or run independent characters concurrently; same-character busy
+responses are not permission to queue or retry. Each forwarded action retains
+its own operation receipt. Batch failure prevents subsequent performs but cannot
+roll back already-sent work. Executor expiry closes dispatch, not native operation
+authority; sent-but-unconfirmed admission must remain visible for reconciliation.
+The executor is not the local emergency-return mechanism.
+
+Use `;lab full access off` when exploratory work ends; this also saves the off
+preference. Stopping LAB or the Lich session removes current execution authority,
+but the saved preference applies on the next start. A failed preference write
+leaves access off locally and warns that the prior saved value may remain;
+verify persistence before restarting. Stable repeated behavior belongs in a typed
+capability or registered controller, where its semantic outcome can be verified.
+
 An authorized movement or combat operation is complete only when fresh evidence
 shows the character alive in the configured safe room with ownership released.
 Stopping a combat script in the field is not a safe handoff. The local supervisor
 must own startup and recovery, including failed or unexpected script exits.
+
+An opted-in `quick seek --area profile` registration grants a bounded local
+search for one encounter, equipment recovery and return to the explicit refuge,
+with movement/combat ownership and native per-send guards. It does not grant
+continuous hunting, unrestricted travel or a new destination selected by the
+model. See [controller controls](Controller-Controls.md#required-safe-refuge-handoff)
+and the [safe-refuge test plan](Agent-Test-Safe-Refuge.md).
 
 Protect the account and protected equipment before routine progress. If knocked
 down, restore posture when safe and feasible before normal offense or looting;

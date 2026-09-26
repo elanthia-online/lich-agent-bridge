@@ -1,0 +1,7 @@
+=begin
+  Fixed entry point for a locally registered, pinned LAB script test.
+  Run only through the LAB operation interface; no command-line authority.
+=end
+
+raise 'LAB test context is unavailable' unless defined?(LichAgentBridge)
+LichAgentBridge.run_test_script(Script.current)

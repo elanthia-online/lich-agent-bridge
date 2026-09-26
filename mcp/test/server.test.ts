@@ -5,7 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { createApp } from '../src/server.js';
 
-test('Streamable HTTP MCP endpoint advertises the exact seven-tool surface', async (context) => {
+test('Streamable HTTP MCP endpoint advertises the exact ten-tool surface', async (context) => {
   const app = createApp({
     host: '127.0.0.1',
     port: 1,
@@ -24,11 +24,20 @@ test('Streamable HTTP MCP endpoint advertises the exact seven-tool surface', asy
   const listed = await client.listTools();
   assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), [
     'lab.capabilities',
+    'lab.combat_report',
     'lab.execute_code',
     'lab.inventory_find',
+    'lab.operation_watch',
     'lab.perform',
     'lab.snapshot',
+    'lab.stop',
     'lab.watch',
     'lab.wiki_search',
   ]);
+  const executor = listed.tools.find(tool => tool.name === 'lab.execute_code')!;
+  assert.match(executor.description ?? '', /8 mutation attempts/);
+  const timeout = executor.inputSchema.properties?.timeout_ms as Record<string, unknown>;
+  assert.equal(timeout.maximum, 30_000);
+  assert.match(executor.description ?? '', /default 10s/);
+  assert.equal(executor.inputSchema.required?.includes('timeout_ms') ?? false, false);
 });

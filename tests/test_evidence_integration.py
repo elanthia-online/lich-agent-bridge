@@ -83,6 +83,51 @@ class EvidenceIntegrationTests(unittest.TestCase):
     def enable(self):
         self.server.actions.control(ActionControl('Testmage', True, 'generation-1'))
 
+    def test_read_only_question_cannot_refresh_even_with_actions_enabled(self):
+        self.start(Turns(request('character.read', freshness='prefer_fresh'),
+                         {'answer': 'Only historical observations are available.'}))
+        self.publish()
+        self.enable()
+        answer = self.server.copilot.ask(AskRequest(
+            'Testmage', 'Check my current training.', read_only=True,
+            expected_generation='generation-1'))
+        self.assertEqual(self.commands, [])
+        self.assertEqual(answer.capability, 'read_only')
+        self.assertIn('read-only', self.model.calls[-1]['input_text'])
+        self.assertTrue(any('read-only' in str(diagnostic) for diagnostic in answer.source_diagnostics))
+        self.assertEqual(len(self.model.calls), 2)
+
+    def test_bound_question_rejects_unknown_or_replaced_session_before_model(self):
+        self.start(Turns({'answer': 'Should not run.'}))
+        for generation in ('missing', 'generation-1'):
+            if generation == 'generation-1':
+                self.publish(generation='generation-2')
+            with self.assertRaises(QuestionInvalidated):
+                self.server.copilot.ask(AskRequest(
+                    'Testmage', 'Training?', read_only=True, expected_generation=generation))
+        self.assertEqual(self.model.calls, [])
+        self.assertEqual(self.commands, [])
+
+    def test_read_only_question_still_reads_fresh_observations(self):
+        self.start(Turns(request('character.read'), {'answer': 'Observed training.'}))
+        self.publish(fresh=True)
+        answer = self.server.copilot.ask(AskRequest(
+            'Testmage', 'Training?', read_only=True, expected_generation='generation-1'))
+        self.assertEqual(answer.capability, 'read_only')
+        self.assertTrue(any(source.get('authority') == 'current_character_observation'
+                            for source in answer.sources))
+        self.assertEqual(self.commands, [])
+
+    def test_read_only_mode_does_not_change_the_next_questions_action_policy(self):
+        self.start(Turns(request('character.read'), {'answer': 'Historical data.'},
+                         request('character.read'), {'answer': 'Fresh data.'}))
+        self.publish()
+        self.enable()
+        self.server.copilot.ask(AskRequest('Testmage', 'Training?', read_only=True))
+        self.assertEqual(self.commands, [])
+        self.server.copilot.ask(AskRequest('Testmage', 'Refresh training.'))
+        self.assertEqual(self.commands, ['info', 'skills'])
+
     def test_model_selected_refresh_updates_database_and_reaches_next_turn(self):
         self.start(Turns(request('character.read'), {'answer': '30 Sorcerer ranks, freshly observed.'}))
         self.publish()

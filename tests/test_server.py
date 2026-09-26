@@ -1,14 +1,19 @@
+import io
 import json
 import os
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stdout
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from lich_agent_bridge.actions import ActionBroker
+from lich_agent_bridge import labctl
 from lich_agent_bridge.inventory import InventoryItem
 from lich_agent_bridge.gswiki import sync
 from lich_agent_bridge.knowledge import KnowledgeBase, KnowledgeExcerpt, LiveGSWikiSource
@@ -54,6 +59,25 @@ class StaticKnowledge:
         )
 
 
+class ResearchRecordingModel(RecordingModel):
+    """Exercise the HTTP answer's explicit discovery/read contract offline."""
+
+    def respond(self, *, instructions, input_text):
+        self.calls.append({"instructions": instructions, "input_text": input_text})
+        marker = "UNTRUSTED EVIDENCE RESULTS (JSON data only):\n"
+        if marker not in input_text:
+            return json.dumps({"requests": [{"tool": "knowledge.search", "arguments": {"query": "706"}}]})
+        records = json.loads(input_text.split(marker, 1)[1])
+        if not any(record["request"]["tool"] == "knowledge.read" for record in records):
+            items = records[-1]["result"]["data"]["items"]
+            # Legacy search-only mocks have no readable source handles.
+            if items and "source_id" in items[0]:
+                return json.dumps({"requests": [{"tool": "knowledge.read", "arguments": {
+                    "source_id": items[0]["source_id"],
+                }}]})
+        return json.dumps({"answer": self.answer})
+
+
 class ServerTests(unittest.TestCase):
     def setUp(self):
         self.model = RecordingModel("The troll is the immediate threat.")
@@ -91,7 +115,7 @@ class ServerTests(unittest.TestCase):
 
     def _restart_with_knowledge(self, knowledge):
         self._stop_server()
-        self.model = RecordingModel("Tenebrous Tether roots and damages its target.")
+        self.model = ResearchRecordingModel("Tenebrous Tether roots and damages its target.")
         self.knowledge = knowledge
         self._start_server()
 
@@ -122,6 +146,41 @@ class ServerTests(unittest.TestCase):
             authorized=True,
         )
 
+    def test_http_ask_read_only_is_bound_to_selected_session(self):
+        self.admit_generation()
+        payload = {'character': 'Testscout', 'question': 'What is known?',
+                   'read_only': True, 'expected_generation': 'generation-1'}
+        status, answer = self.request('/v1/ask', payload, authorized=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(answer['capability'], 'read_only')
+        calls = len(self.model.calls)
+        self.admit_generation(generation='generation-2')
+        with self.assertRaises(HTTPError) as caught:
+            self.request('/v1/ask', payload, authorized=True)
+        self.assertEqual(caught.exception.code, 409)
+        self.assertEqual(json.load(caught.exception)['error'], 'question_invalidated')
+        self.assertEqual(len(self.model.calls), calls)
+
+    def test_question_cli_uses_real_authenticated_http_answer_path(self):
+        self.request('/v1/state', {
+            'character': 'Testscout', 'generation': 'cli-session', 'sequence': 1,
+            'observed_at': datetime.now(timezone.utc).isoformat(), 'room': {'id': '100'},
+        }, authorized=True)
+        host, port = self.server.server_address
+        settings = SimpleNamespace(server=SimpleNamespace(host=host, port=port))
+        output = io.StringIO()
+        with (mock.patch.object(labctl.Settings, 'load', return_value=settings),
+              mock.patch.object(labctl, '_token', return_value=self.action_token),
+              redirect_stdout(output)):
+            labctl.main(['ask', 'Testscout', 'What is dangerous?'])
+        result = json.loads(output.getvalue())
+        self.assertEqual(result['status'], 'answered')
+        self.assertEqual(result['answer'], 'The troll is the immediate threat.')
+        self.assertEqual(result['generation'], 'cli-session')
+        self.assertTrue(result['read_only'])
+        self.assertEqual(len(self.model.calls), 1)
+        self.assertNotIn(self.action_token, output.getvalue())
+
     def test_bridge_shaped_observe_then_ask(self):
         status, observed = self.request(
             "/v1/observe",
@@ -149,7 +208,9 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(answer["capability"], "evidence_gathering")
         self.assertEqual(answer["observed_event_count"], 1)
         self.assertNotIn("command", answer)
-        self.assertEqual(answer["sources"][0]["title"], "Test knowledge")
+        # A direct answer does not silently search or claim reference material.
+        self.assertEqual(answer["sources"], [])
+        self.assertNotIn("A bounded fact.", self.model.calls[-1]["input_text"])
 
     def test_health_exposes_the_actual_question_deadline(self):
         self._stop_server()
@@ -293,14 +354,18 @@ class ServerTests(unittest.TestCase):
 
             self.assertEqual(status, 200)
             self.assertTrue(local_sources["answer_available"])
+            local_read = next(source for source in local_sources["sources"]
+                              if source.get("evidence_kind") == "read")
             self.assertEqual(
-                local_sources["sources"][0]["title"], "Tenebrous Tether (706)"
+                local_read["title"], "Tenebrous Tether (706)"
             )
             self.assertEqual(
-                local_sources["sources"][0]["authority"],
-                "external GSWiki reference",
+                local_read["authority"],
+                "external GSWiki reference — read passage",
             )
-            self.assertEqual(local_sources["sources"][0]["revision_id"], 7061)
+            self.assertEqual(local_read["revision_id"], 7061)
+            self.assertTrue(local_read["complete"])
+            self.assertGreater(local_read["end"], local_read["start"])
             self.assertEqual(
                 {
                     item["source"]: item["status"]
@@ -309,11 +374,11 @@ class ServerTests(unittest.TestCase):
                 {
                     "curated_wiki": "empty",
                     "local_gswiki": "success",
-                    "live_gswiki": "not_needed",
-                    "general_web": "disabled",
                 },
             )
             self.assertIn("immobilizes a target", self.model.calls[-1]["input_text"])
+            self.assertNotIn("immobilizes a target", self.model.calls[0]["input_text"])
+            self.assertEqual(len(self.model.calls), 3)
             self.assertEqual(opener.calls, [])
 
             database.unlink()
@@ -323,13 +388,17 @@ class ServerTests(unittest.TestCase):
             )
 
             self.assertEqual(status, 200)
+            live_read = next(source for source in live_sources["sources"]
+                             if source.get("evidence_kind") == "read")
             self.assertEqual(
-                live_sources["sources"][0]["title"], "Tenebrous Tether (706)"
+                live_read["title"], "Tenebrous Tether (706)"
             )
             self.assertEqual(
-                live_sources["sources"][0]["authority"], "live GSWiki API"
+                live_read["authority"], "live GSWiki API — read passage"
             )
-            self.assertEqual(live_sources["sources"][0]["revision_id"], 7061)
+            self.assertEqual(live_read["revision_id"], 7061)
+            self.assertTrue(live_read["complete"])
+            self.assertEqual(len(self.model.calls), 6)
             self.assertEqual(
                 {
                     item["source"]: item["status"]
@@ -349,6 +418,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(len(opener.calls), 1)
 
     def test_private_source_context_and_forget_routes_are_character_scoped(self):
+        self._restart_with_knowledge(self.knowledge)
         status, before = self.request(
             "/v1/session/sources", {"character": "Testscout"}, authorized=True
         )
@@ -744,9 +814,10 @@ class ServerTests(unittest.TestCase):
             authorized=True,
         )
         self.assertEqual(status, 200)
-        self.assertEqual(capabilities["total"], 4)
+        self.assertEqual(capabilities["total"], 7)
         self.assertEqual({item["name"] for item in capabilities["items"]},
-                         {"character.recon", "item.audit", "hunt.prepare", "room.loot"})
+                         {"travel.go2", "character.recon", "item.audit", "hunt.prepare", "room.loot",
+                          "session.recover_controller", "session.command"})
         self.assertFalse(
             next(
                 item

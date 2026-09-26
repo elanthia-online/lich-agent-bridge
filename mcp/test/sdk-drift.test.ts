@@ -24,6 +24,7 @@ test('generated SDK results are concrete response contracts, not open unknown ba
     /interface CharacterSnapshot \{ character: string; generation: string; sequence: number;/,
   );
   assert.match(SDK_TYPE_DECLARATIONS, /interface OperationResult \{ operation_id: string;/);
+  assert.match(SDK_TYPE_DECLARATIONS, /interface OperationPage \{ operation: OperationResult;/);
   assert.match(SDK_TYPE_DECLARATIONS, /interface CapabilityPage \{/);
   assert.doesNotMatch(SDK_TYPE_DECLARATIONS, /\[key: string\]: unknown/);
 });

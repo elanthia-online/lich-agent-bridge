@@ -55,6 +55,11 @@ GO2_ADAPTER = ScriptAdapter(
     ownership_lanes=frozenset({"movement"}),
     entrypoints=(
         ScriptEntrypoint(
+            name="supervised_travel",
+            command="go2 supervised {destination}",
+            numeric_argument="destination",
+        ),
+        ScriptEntrypoint(
             name="travel",
             command="go2 {destination}",
             numeric_argument="destination",

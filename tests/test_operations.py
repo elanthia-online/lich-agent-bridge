@@ -1,3 +1,4 @@
+import re
 import threading
 import time
 import unittest
@@ -127,6 +128,8 @@ class FakeEvidence:
         self.registrations = []
         self.fail_methods = set()
         self.controller_result = None
+        self.controller_recovery_result = None
+        self.controller_recovery_receipt_result = None
 
     def register(self, operation_id, method, binding):
         token = (operation_id, method, binding.generation, binding.object_id)
@@ -165,6 +168,12 @@ class FakeEvidence:
             action_id=action_id,
         )
 
+    def verify_controller_recovery(self, **_details):
+        return self.controller_recovery_result
+
+    def controller_recovery_receipt(self, **_details):
+        return self.controller_recovery_receipt_result
+
 
 class BrokerDriver:
     def __init__(self, broker, state):
@@ -183,7 +192,7 @@ class BrokerDriver:
         if command in self.no_result_for:
             return
         action = broker.poll(
-            ActionContext(character=snapshot.character, room_id=snapshot.room_id)
+            ActionContext(character=snapshot.character, room_id=snapshot.room_id, generation=snapshot.generation)
         )
         if action["status"] == "confirmation_required":
             broker.approve(
@@ -192,10 +201,11 @@ class BrokerDriver:
                     character=snapshot.character,
                     room_id=snapshot.room_id,
                     approval_mode="auto",
+                    generation=snapshot.generation,
                 )
             )
             action = broker.poll(
-                ActionContext(character=snapshot.character, room_id=snapshot.room_id)
+                ActionContext(character=snapshot.character, room_id=snapshot.room_id, generation=snapshot.generation)
             )
         if command in self.fail_for:
             outcome = "failed"
@@ -243,12 +253,21 @@ class BrokerDriver:
                     **dict(self.state.script_status or {}),
                     "eloot": f"completed:{action['action_id']}",
                 }
+            elif re.fullmatch(r"lab recover [0-9a-f]{16} confirm", command):
+                self.state.sequence += 1
+            elif command.startswith("lab direct "):
+                self.state.sequence += 1
+                self.state.script_status = {
+                    **dict(self.state.script_status or {}),
+                    "lab-direct": f"completed:{action['action_id']}",
+                }
         broker.record_result(
             ActionResult(
                 action_id=action["action_id"],
                 character=snapshot.character,
                 outcome=outcome,
                 detail="command sent" if outcome == "completed" else "rejected",
+                generation=snapshot.generation,
             )
         )
         if self.after_command is not None:
@@ -294,10 +313,13 @@ class CapabilityRunnerTests(unittest.TestCase):
         self.assertEqual(
             set(catalog),
             {
+                "travel.go2",
                 "character.recon",
                 "item.audit",
                 "hunt.prepare",
                 "room.loot",
+                "session.recover_controller",
+                "session.command",
                 "controller.engage",
                 "controller.room",
                 "controller.hunt",
@@ -316,6 +338,86 @@ class CapabilityRunnerTests(unittest.TestCase):
             catalog["item.audit"]["arguments"]["properties"]["methods"]["items"]["enum"],
             list(SUPPORTED_ITEM_AUDIT_METHODS),
         )
+
+    def test_session_command_requires_local_full_access_and_verifies_delivery(self):
+        self.state.fresh = True
+        self.state.sequence = 10
+        self.state.dead = False
+        self.state.stunned = False
+        self.state.hands = {"right": None, "left": None}
+        self.state.scripts = ()
+        self.state.owners = {
+            "movement": None,
+            "combat": None,
+            "inventory": None,
+            "communication": None,
+        }
+        self.state.script_status = {"lab-access": "full"}
+
+        result = self.runner.perform(
+            "Testmage",
+            "session.command",
+            {"command": "join Calvix"},
+            expected_generation="generation-1",
+        )
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(self.driver.commands, ["lab direct join Calvix"])
+        self.assertIn("delivery", result.explanation)
+
+    def test_session_command_accepts_one_lich_script_command(self):
+        self.state.fresh = True
+        self.state.sequence = 10
+        self.state.dead = False
+        self.state.stunned = False
+        self.state.hands = {"right": None, "left": None}
+        self.state.scripts = ()
+        self.state.owners = {
+            "movement": None,
+            "combat": None,
+            "inventory": None,
+            "communication": None,
+        }
+        self.state.script_status = {"lab-access": "full"}
+
+        result = self.runner.perform(
+            "Testmage",
+            "session.command",
+            {"command": ";eohunter Leveling-Trio dry"},
+            expected_generation="generation-1",
+        )
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(
+            self.driver.commands,
+            ["lab direct ;eohunter Leveling-Trio dry"],
+        )
+
+    def test_session_command_fails_before_dispatch_without_local_full_access(self):
+        self.state.fresh = True
+        self.state.sequence = 10
+        self.state.dead = False
+        self.state.stunned = False
+        self.state.hands = {"right": None, "left": None}
+        self.state.scripts = ()
+        self.state.owners = {
+            "movement": None,
+            "combat": None,
+            "inventory": None,
+            "communication": None,
+        }
+        self.state.script_status = {"lab-access": "guarded"}
+
+        result = self.runner.perform(
+            "Testmage",
+            "session.command",
+            {"command": "join Calvix"},
+            expected_generation="generation-1",
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("full access", result.explanation)
+        self.assertEqual(self.driver.commands, [])
 
     def test_terminal_operation_records_end_to_end_timing(self):
         recorded = []

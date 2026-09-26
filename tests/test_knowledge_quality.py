@@ -55,6 +55,60 @@ class KnowledgeQualityTests(unittest.TestCase):
     def knowledge(self, **options):
         return KnowledgeBase(wiki_root=self.wiki, gswiki_database=self.database, **options)
 
+    def test_focused_gameplay_followups_do_not_spend_slots_on_incidental_gear_mentions(self):
+        # These are invented passages for ranking tests, not game mechanics.
+        notes = {
+            "Unarmed.md": "# Unarmed attacks\nSynthetic combat fixture: holding a weapon changes unarmed attacks. Held equipment has its own combat rules.\n",
+            "Locksmith.md": "# Locksmith service\nSynthetic locksmith-only fixture: the player stores a weapon before submitting a locked box. A weapon is not a box.\n",
+            "Resurrection.md": "# Resurrection guide\nSynthetic resurrection-only fixture: a player stows a weapon before handling a body.\n",
+            "Conditions.md": "# Equipment conditions\nSynthetic supporting fixture: weapon restrictions also affect unarmed combat.\n",
+        }
+        for filename, text in notes.items():
+            (self.wiki / "gsiv" / filename).write_text(text)
+        for query in (
+            "How does holding a weapon affect unarmed attacks?",
+            "Previous player question: How do unarmed attacks work?\nClarification: What changes when I hold a weapon?",
+        ):
+            with self.subTest(query=query):
+                knowledge = self.knowledge()
+                selected = knowledge.search(character="Testmage", question=query)
+                self.assertTrue(any("Synthetic combat fixture" in item.text for item in selected))
+                self.assertTrue(any("Synthetic supporting fixture" in item.text for item in selected))
+                self.assertFalse(any("locksmith-only" in item.text or "resurrection-only" in item.text for item in selected))
+                prompt = ContextAssembler(knowledge=knowledge).build(
+                    character="Testmage", question=query,
+                ).to_prompt()
+                self.assertIn("Synthetic combat fixture", prompt)
+                self.assertNotIn("locksmith-only", prompt)
+                self.assertNotIn("resurrection-only", prompt)
+
+    def test_curated_body_only_single_term_and_focused_title_queries_remain_available(self):
+        (self.wiki / "gsiv" / "General.md").write_text(
+            "# Equipment\nSynthetic noun fixture: this badge is decorative.\n"
+        )
+        (self.wiki / "gsiv" / "Locksmith.md").write_text(
+            "# Locksmith service\nSynthetic service fixture: submit a locked box.\n"
+        )
+        cases = [(query, "Synthetic noun fixture") for query in (
+            "badge", "Tell me about badge", "Explain badge", "Describe badge", "Show me badge",
+        )]
+        cases.append(("What does the locksmith charge?", "Synthetic service fixture"))
+        for query, expected in cases:
+            with self.subTest(query=query):
+                selected = self.knowledge().search(character="Testmage", question=query)
+                self.assertTrue(any(expected in item.text for item in selected))
+                prompt = ContextAssembler(knowledge=self.knowledge()).build(
+                    character="Testmage", question=query,
+                ).to_prompt()
+                self.assertIn(expected, prompt)
+
+    def test_development_query_keeps_single_body_match_for_named_interface(self):
+        (self.wiki / "project" / "Adapter.md").write_text(
+            "# Integration boundary\nSynthetic developer fixture: WidgetAPI exposes observations.\n"
+        )
+        selected = self.knowledge().search(character="Testmage", question="How do I call WidgetAPI from my script?")
+        self.assertTrue(any("Synthetic developer fixture" in item.text for item in selected))
+
     def test_gameplay_spell_questions_select_mechanics_before_incidental_notes(self):
         knowledge = self.knowledge()
         cases = (
