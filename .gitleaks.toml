@@ -1,0 +1,7 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Pinned public MiniLM tokenizer SHA-256, not an API credential"
+regexTarget = "secret"
+regexes = ['''^be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037$''']

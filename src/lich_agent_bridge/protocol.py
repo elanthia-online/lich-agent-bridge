@@ -631,6 +631,8 @@ class Observation:
 class AskRequest:
     character: str
     question: str
+    read_only: bool = False
+    expected_generation: str | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "AskRequest":
@@ -638,14 +640,22 @@ class AskRequest:
             raise ValidationError("ask request must be an object")
         _strict_keys(
             value,
-            allowed={"character", "question"},
+            allowed={"character", "question", "read_only", "expected_generation"},
             required={"character", "question"},
         )
+        read_only = value.get("read_only", False)
+        if type(read_only) is not bool:
+            raise ValidationError("read_only must be a boolean")
+        generation = value.get("expected_generation")
+        if "expected_generation" in value:
+            generation = _text(generation, "expected_generation", maximum=MAX_GENERATION_LENGTH)
         return cls(
             character=_text(
                 value["character"], "character", maximum=MAX_CHARACTER_LENGTH
             ),
             question=_text(value["question"], "question", maximum=MAX_QUESTION_LENGTH),
+            read_only=read_only,
+            expected_generation=generation,
         )
 
 

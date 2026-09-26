@@ -35,6 +35,7 @@ from .errors import (ConfigurationError, ModelError, ValidationError, QuestionBu
 from .inventory import InventoryKnowledge
 from .character_knowledge import CharacterKnowledge
 from .evidence_tools import EvidenceTools
+from .evidence_loop import EvidenceLoop
 from .knowledge import KnowledgeBase
 from .model import OpenAICompatibleChatModel, OpenAIResponsesModel
 from .protocol import (
@@ -217,6 +218,8 @@ class LabRequestHandler(BaseHTTPRequestHandler):
                 self._json(200, self.server.session_hub.snapshot(payload))
             elif parsed.path == "/v1/session/watch":
                 self._json(200, self.server.session_hub.watch(payload))
+            elif parsed.path == "/v1/session/combat/report":
+                self._json(200, self.server.session_hub.combat_report(payload))
             elif parsed.path == "/v1/session/inventory/find":
                 self._json(200, self.server.session_hub.inventory_find(payload))
             elif parsed.path == "/v1/session/wiki/search":
@@ -231,6 +234,8 @@ class LabRequestHandler(BaseHTTPRequestHandler):
                 self._json(200, self.server.session_hub.watch_operation(payload))
             elif parsed.path == "/v1/session/operation/stop":
                 self._json(200, self.server.session_hub.stop_operation(payload))
+            elif parsed.path == "/v1/session/operation/control":
+                self._json(202, self.server.session_hub.control_operation(payload))
             elif parsed.path.startswith("/v1/actions/"):
                 if parsed.path == "/v1/actions/control":
                     result = self.server.actions.control(ActionControl.from_mapping(payload))
@@ -414,7 +419,14 @@ def build_server(
         context_assembler=assembler,
         timing=timings,
         custom_instructions=custom_instructions_from_settings(resolved),
-        evidence_tools=EvidenceTools(hub, character_knowledge=selected_character_knowledge),
+        evidence_tools=EvidenceTools(
+            hub, character_knowledge=selected_character_knowledge,
+            max_result_chars=resolved.selected_profile.evidence_result_chars,
+        ),
+        evidence_loop=EvidenceLoop(
+            max_result_chars=resolved.selected_profile.evidence_result_chars,
+            max_evidence_chars=resolved.selected_profile.evidence_total_chars,
+        ),
     )
     return LabHTTPServer(
         (selected.host, selected.port),

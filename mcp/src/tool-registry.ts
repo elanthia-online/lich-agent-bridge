@@ -43,6 +43,17 @@ export const DIRECT_TOOL_REGISTRY = {
     }),
     returnType: 'ItemPage',
   },
+  combatReport: {
+    toolName: 'lab.combat_report',
+    sdkMethod: 'combatReport',
+    route: 'combatReport',
+    description: 'Read retained recorded evidence for a LAB controller trial, after verified safe return. Historical association, not causal proof. No game commands. Omit operation_id for the latest controller operation.',
+    input: z.strictObject({
+      character,
+      operation_id: z.string().regex(/^[0-9a-f]{16}$/).optional(),
+    }),
+    returnType: 'CombatReport',
+  },
   wikiSearch: {
     toolName: 'lab.wiki_search',
     sdkMethod: 'wikiSearch',
@@ -59,13 +70,39 @@ export const DIRECT_TOOL_REGISTRY = {
     toolName: 'lab.perform',
     sdkMethod: 'perform',
     route: 'perform',
-    description: 'Request one outcome-oriented SessionHub capability. SessionHub remains the policy authority.',
+    description: 'Start one outcome-oriented SessionHub capability and return its operation ticket immediately. Poll it with lab.operation_watch.',
     input: z.strictObject({
       character,
       capability: z.string().trim().regex(/^[a-z][a-z0-9_.-]{0,63}$/).describe('Registered SessionHub capability name.'),
       args: z.record(z.string(), z.unknown()).optional().describe('Capability-specific JSON arguments.'),
+      expected_generation: z.string().trim().min(1).max(128).optional().describe('Observed session generation; required for trusted script tests.'),
+      timeout_seconds: z.number().positive().max(300).optional().describe('Total operation budget in seconds, including recovery and return; default 30. Configured refuge outings may use up to 300 seconds; direct travel may use up to 120.'),
     }),
     returnType: 'OperationResult',
+  },
+  operationWatch: {
+    toolName: 'lab.operation_watch',
+    sdkMethod: 'operationWatch',
+    route: 'operationWatch',
+    description: 'Read progress after a cursor for one operation ticket. Repeat until the returned operation is terminal.',
+    input: z.strictObject({
+      operation_id: z.string().trim().min(1).max(64),
+      cursor: z.string().regex(/^\d+$/).max(32).optional().describe('Progress cursor from a prior operation watch; default 0.'),
+      timeout_ms: z.number().int().min(0).max(30_000).optional().describe('Long-poll timeout in milliseconds, up to 30000.'),
+    }),
+    returnType: 'OperationPage',
+  },
+  stop: {
+    toolName: 'lab.stop',
+    sdkMethod: 'stop',
+    route: 'operationStop',
+    description: 'Request cancellation of one exact operation and generation. Acknowledgment is not proof of script cleanup.',
+    input: z.strictObject({
+      character,
+      operation_id: z.string().trim().min(1).max(64),
+      expected_generation: z.string().trim().min(1).max(128),
+    }),
+    returnType: 'OperationStopResult',
   },
 } as const satisfies Record<string, {
   toolName: `lab.${string}`;
@@ -84,7 +121,7 @@ export const DIRECT_TOOLS = Object.values(DIRECT_TOOL_REGISTRY);
 
 export const EXECUTE_CODE_INPUT = z.strictObject({
   code: z.string().min(1).describe('TypeScript function-body code. Use await lab.* and return a JSON-serializable result.'),
-  timeout_ms: z.number().int().min(1).max(10_000).optional().describe('Execution timeout in milliseconds; default and maximum are 10000.'),
+  timeout_ms: z.number().int().min(1).max(30_000).optional().describe('Execution timeout in milliseconds; default 10000, opt-in maximum 30000. Does not extend native operation authority.'),
 });
 
 export function entryByToolName(name: string): DirectToolEntry | undefined {

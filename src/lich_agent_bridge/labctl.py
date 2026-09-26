@@ -6,6 +6,7 @@ import argparse
 from datetime import datetime, timezone
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -16,9 +17,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-from .errors import ConfigurationError
+from .errors import ConfigurationError, ValidationError
+from .controller_manifest import CONTROLLER_CONTROLS
 from .gswiki import DEFAULT_NAMESPACES, sync
 from .local_connection import read_action_token
+from .question_tests import QuestionSession, load_corpus, run_corpus, validate_question
 from .settings import GeneralWebProvider, ProviderKind, Settings
 from .timings import timing_report
 from .world_state import MAX_WATCH_TIMEOUT_SECONDS
@@ -55,6 +58,9 @@ def parser() -> argparse.ArgumentParser:
     )
     wiki_commands = wiki.add_subparsers(dest="wiki_command", required=True)
     wiki_commands.add_parser("status", help="show mirror health, size, and freshness")
+    wiki_commands.add_parser(
+        "index", help="atomically build the local passage index without downloading wiki pages"
+    )
     refresh = wiki_commands.add_parser(
         "refresh", help="atomically refresh the local GSWiki mirror"
     )
@@ -63,6 +69,38 @@ def parser() -> argparse.ArgumentParser:
 
     state = commands.add_parser("state", help="show the current character snapshot")
     state.add_argument("character")
+
+    ask = commands.add_parser(
+        "ask", help="ask one question using current state (read-only by default)"
+    )
+    ask.add_argument("character")
+    ask.add_argument("question")
+    ask.add_argument(
+        "--allow-recon", action="store_true",
+        help="allow fixed INFO/SKILLS recon through existing action and approval gates",
+    )
+
+    questions = commands.add_parser(
+        "questions", help="record a private sequential corpus (read-only by default)"
+    )
+    questions.add_argument("character")
+    questions.add_argument("corpus", type=Path)
+    questions.add_argument(
+        "--output", type=Path, required=True,
+        help="new private result JSON file (never overwritten)",
+    )
+    questions.add_argument(
+        "--allow-recon", action="store_true",
+        help="allow fixed INFO/SKILLS recon through existing action and approval gates",
+    )
+
+    tests = commands.add_parser("tests", help="prepare explicitly trusted script suites offline")
+    test_commands = tests.add_subparsers(dest="test_command", required=True)
+    prepare = test_commands.add_parser("prepare", help="validate files and print an uninstalled controller entry")
+    prepare.add_argument("manifest", type=Path)
+    prepare.add_argument("--scripts-dir", type=Path, required=True)
+    prepare.add_argument("--character", required=True)
+    prepare.add_argument("--room-id", required=True)
 
     watch = commands.add_parser("watch", help="stream meaningful character events")
     watch.add_argument("character")
@@ -79,6 +117,10 @@ def parser() -> argparse.ArgumentParser:
     inventory = commands.add_parser("inventory", help="search durable inventory facts")
     inventory.add_argument("character")
     inventory.add_argument("query")
+
+    combat_report = commands.add_parser("combat-report", help="read retained LAB trial combat evidence")
+    combat_report.add_argument("character")
+    combat_report.add_argument("--operation-id")
 
     sources = commands.add_parser(
         "sources", help="show references supplied to a character's most recent answer"
@@ -98,10 +140,22 @@ def parser() -> argparse.ArgumentParser:
         help="capability-specific JSON argument; may be repeated",
     )
     perform.add_argument("--wait", action="store_true")
-    perform.add_argument("--timeout", type=float, default=30.0)
+    perform.add_argument("--timeout", type=float, default=30.0,
+                         help="Watch long-poll seconds (0–30); does not extend the operation.")
+    perform.add_argument("--operation-timeout", type=float, default=30.0,
+                         help="Total operation seconds (default 30; refuge outings up to 300, including recovery).")
+    perform.add_argument("--expected-generation", help="bind admission to the observed session generation")
 
     stop = commands.add_parser("stop", help="interrupt a character's active operation")
     stop.add_argument("character")
+    stop.add_argument("--operation-id", help="stop this exact operation, not a successor")
+    stop.add_argument("--expected-generation", help="required with --operation-id")
+
+    control = commands.add_parser("control", help="request a registered control on an exact active operation")
+    control.add_argument("character")
+    control.add_argument("control", choices=sorted(CONTROLLER_CONTROLS))
+    control.add_argument("--operation-id", required=True, help="control this exact operation, not a successor")
+    control.add_argument("--expected-generation", required=True, help="bind the control to the operation's session")
     return result
 
 
@@ -138,13 +192,13 @@ def _request(
     except HTTPError as error:
         try:
             body = json.loads(error.read())
-            detail = body.get("detail", body.get("error", error.reason))
-        except (json.JSONDecodeError, UnicodeError):
+            detail = body.get("detail", body.get("error", error.reason)) if isinstance(body, dict) else error.reason
+        except (json.JSONDecodeError, UnicodeError, RecursionError):
             detail = error.reason
         raise SystemExit(f"LAB request failed ({error.code}): {detail}") from error
     except URLError as error:
         raise SystemExit(f"sidecar unavailable: {error.reason}") from error
-    except (json.JSONDecodeError, UnicodeError) as error:
+    except (json.JSONDecodeError, UnicodeError, RecursionError) as error:
         raise SystemExit("sidecar returned invalid JSON") from error
 
 
@@ -173,13 +227,13 @@ def _post(
     except HTTPError as error:
         try:
             body = json.loads(error.read())
-            detail = body.get("detail", body.get("error", error.reason))
-        except (json.JSONDecodeError, UnicodeError):
+            detail = body.get("detail", body.get("error", error.reason)) if isinstance(body, dict) else error.reason
+        except (json.JSONDecodeError, UnicodeError, RecursionError):
             detail = error.reason
         raise SystemExit(f"LAB request failed ({error.code}): {detail}") from error
     except URLError as error:
         raise SystemExit(f"sidecar unavailable: {error.reason}") from error
-    except (json.JSONDecodeError, UnicodeError) as error:
+    except (json.JSONDecodeError, UnicodeError, RecursionError) as error:
         raise SystemExit("sidecar returned invalid JSON") from error
 
 
@@ -281,6 +335,10 @@ def _setup(path: Path) -> None:
         )
         knowledge["gswiki_database"] = _prompt(
             "Local GSWiki database", knowledge["gswiki_database"]
+        )
+        knowledge["semantic_model_directory"] = _prompt_optional(
+            "Optional local semantic model directory (unset keeps lexical retrieval)",
+            knowledge["semantic_model_directory"],
         )
         knowledge["mirror_max_age_hours"] = _prompt_float(
             "Mirror freshness threshold in hours",
@@ -451,6 +509,7 @@ def _wiki_status(settings: Settings) -> dict[str, Any]:
         "health": _gswiki_check(str(path), settings.knowledge.mirror_max_age_hours),
         "size_bytes": path.stat().st_size if path.is_file() else 0,
         "last_sync": None,
+        "passage_index": {"status": "missing"},
     }
     if not path.is_file():
         return summary
@@ -460,12 +519,27 @@ def _wiki_status(settings: Settings) -> dict[str, Any]:
             "SELECT value FROM metadata WHERE key = 'last_sync'"
         ).fetchone()
         summary["last_sync"] = None if row is None else row[0]
+        from .passage_index import status as passage_status
+
+        summary["passage_index"] = passage_status(connection)
     except sqlite3.Error:
         pass
     finally:
         if "connection" in locals():
             connection.close()
     return summary
+
+
+def _wiki_index(settings: Settings) -> dict[str, Any]:
+    from .passage_index import PassageIndexUnavailable, rebuild
+
+    path = settings.knowledge.gswiki_database
+    try:
+        result = rebuild(path)
+    except (OSError, ValueError, sqlite3.Error, PassageIndexUnavailable) as error:
+        return {"status": "error", "database": str(path),
+                "detail": f"passage indexing failed; previous mirror was retained: {error}"}
+    return {"status": "ok", "database": str(path), "passage_index": result}
 
 
 def _wiki_refresh(
@@ -532,6 +606,19 @@ def _general_web_check(settings: Settings, environment: dict[str, str]) -> dict[
     if credential is None or not environment.get(credential):
         return _check("general_web", "warning", f"environment variable {credential or 'for general web'} is not set")
     return _check("general_web", "ok", "brave general-web fallback configured")
+
+
+def _semantic_check(settings: Settings) -> dict[str, str]:
+    directory = settings.knowledge.semantic_model_directory
+    if directory is None:
+        return {**_check("semantic_model", "ok", "disabled; using lexical retrieval"),
+                "semantic_status": "disabled"}
+    from .semantic import inspect_model
+
+    inspection = inspect_model(directory)
+    status = inspection["status"]
+    return {**_check("semantic_model", "ok" if status == "ready" else "warning",
+                     inspection["detail"]), "semantic_status": status}
 
 
 def _loopback_host(host: str) -> bool:
@@ -688,6 +775,7 @@ def _doctor(path: Path) -> dict[str, Any]:
         _gswiki_check(
             knowledge["gswiki_database"], knowledge["mirror_max_age_hours"]
         ),
+        _semantic_check(settings),
         _general_web_check(settings, dict(os.environ)),
         _inventory_check(str(settings.storage.resolved_inventory_database or "")),
         _optional_path_check(
@@ -735,6 +823,17 @@ def _perform_args(args: argparse.Namespace) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> None:
     args = parser().parse_args(argv)
+    if args.command == "tests":
+        from .script_tests import prepare_script_suite
+
+        try:
+            registration = prepare_script_suite(
+                args.manifest, args.scripts_dir, args.character, args.room_id
+            )
+        except (ConfigurationError, ValidationError, OSError) as error:
+            raise SystemExit(f"cannot prepare script suite: {error}") from error
+        _dump(registration)
+        return
     active_config = Settings.path_for(args.config)
     if args.command == "setup":
         _setup(active_config)
@@ -771,11 +870,50 @@ def main(argv: list[str] | None = None) -> None:
         if args.wiki_command == "status":
             _dump(_wiki_status(settings))
             return
+        if args.wiki_command == "index":
+            result = _wiki_index(settings)
+            _dump(result)
+            if result["status"] != "ok":
+                raise SystemExit(1)
+            return
         _dump(
             _wiki_refresh(
                 settings, namespaces=args.namespaces, delay=args.delay
             )
         )
+        return
+
+    if args.command in {"ask", "questions"}:
+        try:
+            if args.command == "ask":
+                validate_question(args.character, args.question)
+                cases = []
+            else:
+                cases = load_corpus(args.corpus, args.character)
+            token = _token(settings)
+            session = QuestionSession(
+                args.character,
+                lambda path: _request(path, settings=settings, token=token),
+                lambda payload, timeout: _post(
+                    "/v1/ask", payload, settings=settings, token=token, timeout=timeout
+                ),
+                allow_recon=args.allow_recon,
+            )
+            if args.command == "ask":
+                result = session.answer(args.question)
+                _dump(result)
+                if result["status"] != "answered":
+                    raise SystemExit(1)
+            else:
+                report = run_corpus(session, cases, args.output)
+                _dump({
+                    "status": report["status"], "output": str(args.output),
+                    "cases": len(cases), "quality_review": "required",
+                })
+                if report["status"] != "completed":
+                    raise SystemExit(1)
+        except (ValidationError, OSError) as error:
+            raise SystemExit(f"cannot run questions: {error}") from error
         return
 
     token = _token(settings)
@@ -786,6 +924,12 @@ def main(argv: list[str] | None = None) -> None:
                 f"/v1/state/{character}", settings=settings, token=token
             )
         )
+        return
+    if args.command == "combat-report":
+        payload = {"character": args.character}
+        if args.operation_id:
+            payload["operation_id"] = args.operation_id
+        _dump(_post("/v1/session/combat/report", payload, settings=settings, token=token))
         return
     if args.command == "inventory":
         _dump(
@@ -808,26 +952,41 @@ def main(argv: list[str] | None = None) -> None:
         )
         return
     if args.command == "stop":
+        if bool(args.operation_id) != bool(args.expected_generation):
+            raise SystemExit("--operation-id and --expected-generation must be supplied together")
+        payload = {"character": args.character}
+        if args.operation_id:
+            payload.update(operation_id=args.operation_id, expected_generation=args.expected_generation)
         _dump(
             _post(
                 "/v1/session/operation/stop",
-                {"character": args.character},
+                payload,
                 settings=settings,
                 token=token,
             )
         )
         return
+    if args.command == "control":
+        _dump(_post(
+            "/v1/session/operation/control",
+            {"character": args.character, "operation_id": args.operation_id,
+             "expected_generation": args.expected_generation, "control": args.control},
+            settings=settings, token=token,
+        ))
+        return
     if args.command == "perform":
-        if not 0 <= args.timeout <= MAX_WATCH_TIMEOUT_SECONDS:
-            raise SystemExit(
-                f"--timeout must be between 0 and {MAX_WATCH_TIMEOUT_SECONDS:g}"
-            )
+        if not math.isfinite(args.timeout) or not 0 <= args.timeout <= MAX_WATCH_TIMEOUT_SECONDS:
+            raise SystemExit(f"--timeout must be between 0 and {MAX_WATCH_TIMEOUT_SECONDS:g}")
+        if not math.isfinite(args.operation_timeout) or not 0 < args.operation_timeout <= 300:
+            raise SystemExit("--operation-timeout must be positive and at most 300 seconds")
         operation = _post(
             "/v1/session/perform",
             {
                 "character": args.character,
                 "capability": args.capability,
                 "args": _perform_args(args),
+                "timeout_seconds": args.operation_timeout,
+                **({"expected_generation": args.expected_generation} if args.expected_generation else {}),
             },
             settings=settings,
             token=token,

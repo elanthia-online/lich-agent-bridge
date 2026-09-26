@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "controllers": [{
+    "name": "eohunter-trial",
+    "script": "eohunter",
+    "summary": "Opt-in bounded EO Hunter trial campaign using reviewed profile routines, native looting, exact refuge return, and structured combat evidence.",
+    "characters": ["Testmage"],
+    "result_global": "$lab_eohunter_result",
+    "lanes": ["movement", "combat", "inventory"],
+    "owner_scripts": ["eohunter", "go2"],
+    "control_owner_scripts": ["eohunter"],
+    "safe_handoff": {
+      "kind": "controller_refuge",
+      "room_id": "1000",
+      "return_seconds": 45
+    },
+    "capability_action": "start",
+    "actions": [
+      {
+        "name": "start",
+        "kind": "launch",
+        "launch_mode": "start",
+        "command_template": "eohunter {profile} trial {trial}",
+        "script_args_template": "{profile} trial {trial}",
+        "parameters": [
+          {"name": "profile", "type": "enum", "values": ["Reviewed-Trial"]},
+          {"name": "trial", "type": "enum", "values": ["a-b-c"]}
+        ],
+        "policy": {"category": "combat", "confirmation_required": true}
+      },
+      {
+        "name": "status",
+        "kind": "control",
+        "command_template": "eohunter control status {run_id}",
+        "script_args_template": "",
+        "parameters": [{"name": "run_id", "type": "action_id"}],
+        "policy": {"category": "inspection", "confirmation_required": false}
+      },
+      {
+        "name": "hold",
+        "kind": "control",
+        "command_template": "eohunter control hold {run_id}",
+        "script_args_template": "",
+        "parameters": [{"name": "run_id", "type": "action_id"}],
+        "policy": {"category": "combat", "confirmation_required": true}
+      },
+      {
+        "name": "resume",
+        "kind": "control",
+        "command_template": "eohunter control resume {run_id}",
+        "script_args_template": "",
+        "parameters": [{"name": "run_id", "type": "action_id"}],
+        "policy": {"category": "combat", "confirmation_required": true}
+      },
+      {
+        "name": "retreat",
+        "kind": "control",
+        "command_template": "eohunter control retreat {run_id}",
+        "script_args_template": "",
+        "parameters": [{"name": "run_id", "type": "action_id"}],
+        "policy": {"category": "combat", "confirmation_required": true}
+      }
+    ]
+  }]
+}

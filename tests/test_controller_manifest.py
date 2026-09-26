@@ -16,6 +16,24 @@ class ControllerManifestTests(unittest.TestCase):
         self.assertEqual(manifest.controllers, ())
         self.assertIsNone(manifest.match_command("lab-test-hunt start test-hunt"))
 
+    def test_eohunter_example_is_opt_in_bounded_and_exact(self):
+        manifest = ControllerManifest.load(
+            Path(__file__).parents[1] / "examples" / "controllers" / "eohunter-trial-campaign.json"
+        )
+        controller = manifest.controller("eohunter-trial")
+        self.assertEqual(controller.safe_handoff["kind"], "controller_refuge")
+        self.assertEqual(controller.safe_room({}), "1000")
+        command, script_args, arguments = controller.action("start").build(
+            {"profile": "Reviewed-Trial", "trial": "a-b-c"}
+        )
+        self.assertEqual(command, "eohunter Reviewed-Trial trial a-b-c")
+        self.assertEqual(script_args, "Reviewed-Trial trial a-b-c")
+        self.assertEqual(arguments, {"profile": "Reviewed-Trial", "trial": "a-b-c"})
+        with self.assertRaises(ValidationError):
+            controller.action("start").build(
+                {"profile": "Reviewed-Trial", "trial": "a-b-d"}
+            )
+
     def test_manifest_exposes_all_controllers_and_testknight_hunt(self):
         self.assertEqual(
             [item.name for item in self.manifest.controllers],

@@ -1,0 +1,1 @@
+{"version":1,"expectations":{"player:acceptance-phase:1:acceptance-generation:101":{"recommendations":["attack_target","wait"],"target_id":"synthetic-target-a"}}}

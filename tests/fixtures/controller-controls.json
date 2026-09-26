@@ -1,0 +1,110 @@
+{
+  "version": 1,
+  "controllers": [
+    {
+      "name": "quick",
+      "script": "lab-test-quick",
+      "summary": "Synthetic exact-run control fixture.",
+      "characters": [
+        "Testmage"
+      ],
+      "result_global": "$lab_quick_result",
+      "lanes": [
+        "movement",
+        "combat"
+      ],
+      "owner_scripts": [
+        "lab-test-quick",
+        "bigshot",
+        "go2"
+      ],
+      "control_owner_scripts": [
+        "lab-test-quick",
+        "bigshot"
+      ],
+      "safe_handoff": {
+        "kind": "room",
+        "room_id": "1000"
+      },
+      "capability_action": "start",
+      "actions": [
+        {
+          "name": "start",
+          "kind": "launch",
+          "launch_mode": "start",
+          "command_template": "lab-test-quick start",
+          "script_args_template": "",
+          "policy": {
+            "category": "combat",
+            "confirmation_required": true
+          },
+          "parameters": []
+        },
+        {
+          "name": "status",
+          "kind": "control",
+          "command_template": "lab-test-quick status {run_id}",
+          "script_args_template": "",
+          "policy": {
+            "category": "inspection",
+            "confirmation_required": false
+          },
+          "parameters": [
+            {
+              "name": "run_id",
+              "type": "action_id"
+            }
+          ]
+        },
+        {
+          "name": "hold",
+          "kind": "control",
+          "command_template": "lab-test-quick hold {run_id}",
+          "script_args_template": "",
+          "policy": {
+            "category": "combat",
+            "confirmation_required": true
+          },
+          "parameters": [
+            {
+              "name": "run_id",
+              "type": "action_id"
+            }
+          ]
+        },
+        {
+          "name": "resume",
+          "kind": "control",
+          "command_template": "lab-test-quick resume {run_id}",
+          "script_args_template": "",
+          "policy": {
+            "category": "combat",
+            "confirmation_required": true
+          },
+          "parameters": [
+            {
+              "name": "run_id",
+              "type": "action_id"
+            }
+          ]
+        },
+        {
+          "name": "retreat",
+          "kind": "control",
+          "command_template": "lab-test-quick retreat {run_id}",
+          "script_args_template": "",
+          "policy": {
+            "category": "combat",
+            "confirmation_required": true
+          },
+          "parameters": [
+            {
+              "name": "run_id",
+              "type": "action_id"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

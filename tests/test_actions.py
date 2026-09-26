@@ -95,6 +95,46 @@ class ActionBrokerTests(unittest.TestCase):
             self.broker.get(action["action_id"])["completion"], "sent_unverified"
         )
 
+    def test_full_access_wrapper_dispatches_one_audited_game_command(self):
+        proposed = self.broker.submit(
+            ActionProposal(character="Testscout", command="lab direct join Testleader")
+        )
+
+        self.assertEqual(proposed["status"], "queued")
+        self.assertEqual(proposed["kind"], "direct")
+        action = self.broker.poll(ActionContext("Testscout", "1000"))
+        self.assertEqual(action["command"], "lab direct join Testleader")
+
+    def test_full_access_wrapper_dispatches_one_lich_script_command(self):
+        proposed = self.broker.submit(
+            ActionProposal(
+                character="Testscout",
+                command="lab direct ;eohunter Leveling-Trio dry",
+            )
+        )
+
+        self.assertEqual(proposed["status"], "queued")
+        self.assertEqual(proposed["kind"], "direct")
+        action = self.broker.poll(ActionContext("Testscout", "1000"))
+        self.assertEqual(
+            action["command"], "lab direct ;eohunter Leveling-Trio dry"
+        )
+
+    def test_full_access_wrapper_rejects_client_commands_and_chaining(self):
+        for command in (
+            "lab direct ;e puts 'no'",
+            "lab direct ;exec puts 'no'",
+            "lab direct , ask something",
+            "lab direct ;eohunter Leveling-Trio dry;quit",
+            "lab direct join Testleader;drop all",
+            "lab direct join Testleader\nquit",
+        ):
+            with self.subTest(command=command):
+                with self.assertRaises(ValidationError):
+                    self.broker.submit(
+                        ActionProposal(character="Testscout", command=command)
+                    )
+
     def test_poll_wait_wakes_when_an_action_is_submitted(self):
         observed = []
 
@@ -613,6 +653,24 @@ class CommandPolicyTests(unittest.TestCase):
         normalized, decision = CommandPolicy().evaluate("ready weapon #152828719")
         self.assertEqual(normalized, "ready weapon #152828719")
         self.assertTrue(decision.confirmation_required)
+
+    def test_exact_controller_recovery_is_brokered_and_requires_confirmation(self):
+        command = "lab recover 0123456789abcdef confirm"
+        normalized, decision = CommandPolicy().evaluate(command)
+        self.assertEqual(normalized, command)
+        self.assertEqual(decision.kind, "configuration")
+        self.assertTrue(decision.confirmation_required)
+
+    def test_controller_recovery_rejects_broad_or_malformed_commands(self):
+        for command in (
+            "lab recover",
+            "lab recover all confirm",
+            "lab recover 0123456789abcde confirm",
+            "lab recover 0123456789abcdef",
+            "lab recover 0123456789abcdef confirm extra",
+        ):
+            with self.subTest(command=command), self.assertRaises(ValidationError):
+                CommandPolicy().evaluate(command)
 
 
 class ActionTokenTests(unittest.TestCase):

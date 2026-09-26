@@ -414,6 +414,15 @@ class LabctlTests(unittest.TestCase):
             token="secret",
         )
 
+    def test_combat_report_uses_authenticated_read_route(self):
+        with patch.object(labctl, "_token", return_value="secret"):
+            with patch.object(labctl, "_post", return_value={"status": "unavailable"}) as request:
+                with redirect_stdout(io.StringIO()):
+                    labctl.main(["combat-report", "Testmage", "--operation-id", "a" * 16])
+        request.assert_called_once_with("/v1/session/combat/report",
+                                       {"character": "Testmage", "operation_id": "a" * 16},
+                                       settings=ANY, token="secret")
+
     def test_sources_uses_authenticated_last_answer_provenance_route(self):
         output = io.StringIO()
         response = {"character": "Testmage", "answer_available": False, "sources": []}

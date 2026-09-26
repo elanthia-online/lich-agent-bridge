@@ -19,10 +19,10 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
-from .actions import ActionBroker, ActionProposal
-from .controller_manifest import ControllerDefinition, ControllerManifest
+from .actions import ActionBroker, ActionProposal, normalize_full_access_command
+from .controller_manifest import CONTROLLER_CONTROLS, ControllerDefinition, ControllerManifest
 from .errors import ValidationError
-from .script_adapters import BIGSHOT_ADAPTER, ELOOT_ADAPTER, ScriptAdapter
+from .script_adapters import BIGSHOT_ADAPTER, ELOOT_ADAPTER, GO2_ADAPTER, ScriptAdapter
 from .watchers import CharacterProfile
 from .timings import emit_timing
 
@@ -51,6 +51,13 @@ _EMPTY_ARGUMENTS: Mapping[str, Any] = {
     "additionalProperties": False,
 }
 CAPABILITY_DEFINITIONS = (
+    CapabilityDefinition(
+        name="travel.go2",
+        summary="Travel to one explicitly authorized mapped room with native go2; verify arrival and released ownership.",
+        arguments={"type": "object", "properties": {"destination": {"type": "string", "pattern": "^[1-9][0-9]{0,9}$"}},
+                   "required": ["destination"], "additionalProperties": False},
+        handler_name="_execute_go2",
+    ),
     CapabilityDefinition(
         name="character.recon",
         summary="Refresh INFO and/or SKILLS and verify newly observed character records.",
@@ -98,6 +105,33 @@ CAPABILITY_DEFINITIONS = (
         summary="Run one verified ELoot sweep for exact corpses in the current safe room.",
         arguments=_EMPTY_ARGUMENTS,
         handler_name="_execute_room_loot",
+    ),
+    CapabilityDefinition(
+        name="session.recover_controller",
+        summary="After explicit operator confirmation, acknowledge one exact safe controller handoff in the owning logged-in session.",
+        arguments={
+            "type": "object",
+            "properties": {
+                "action_id": {"type": "string", "pattern": "^[0-9a-f]{16}$"},
+                "confirm": {"type": "boolean", "const": True},
+            },
+            "required": ["action_id", "confirm"],
+            "additionalProperties": False,
+        },
+        handler_name="_execute_controller_recovery",
+    ),
+    CapabilityDefinition(
+        name="session.command",
+        summary="Send one game-input or Lich script command through a locally enabled full-access session; delivery is verified but the effect is not inferred.",
+        arguments={
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "minLength": 1, "maxLength": 140},
+            },
+            "required": ["command"],
+            "additionalProperties": False,
+        },
+        handler_name="_execute_session_command",
     ),
 )
 @dataclass(frozen=True, slots=True)
@@ -247,6 +281,14 @@ class EvidenceAdapter(Protocol):
         timeout_seconds: float,
     ) -> EvidenceRecord | None: ...
 
+    def verify_controller_recovery(self, *, character: str, controller: str,
+                                   previous_generation: str, generation: str,
+                                   action_id: str, room_id: str,
+                                   hands: tuple[str | None, str | None]) -> bool: ...
+
+    def controller_recovery_receipt(self, *, character: str, generation: str,
+                                    action_id: str) -> Mapping[str, Any] | None: ...
+
 
 StepHook = Callable[[ActionBroker, Mapping[str, Any], SessionState], None]
 AlertSink = Callable[[Mapping[str, Any]], None]
@@ -328,6 +370,14 @@ class CapabilityRunner:
         self._operations: OrderedDict[str, OperationRecord] = OrderedDict()
         self._interruptions: set[str] = set()
         self._recon_actions: dict[str, tuple[str, str]] = {}
+        self._travel_actions: dict[str, tuple[str, str]] = {}
+        self._test_actions: dict[str, tuple[str, str]] = {}
+        self._controller_actions: dict[str, tuple[str, str]] = {}
+        self._graceful_stops: set[str] = set()
+        # Survives terminal history eviction: an unsafe outing is not permission
+        # to start another. The native bridge independently retains its owner.
+        self._refuge_pending: dict[str, tuple[str, ControllerDefinition, SessionState, str]] = {}
+        self._controller_controls: dict[str, set[str]] = {}
         self._cursor = 0
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
@@ -512,6 +562,7 @@ class CapabilityRunner:
                     raise ValidationError("operation history is full of active work")
                 self._operations.pop(evicted_id)
                 self._interruptions.discard(evicted_id)
+                self._graceful_stops.discard(evicted_id)
             self._operations[operation.operation_id] = operation
             self._emit_locked(operation, "requested", "operation requested")
         return operation
@@ -525,9 +576,24 @@ class CapabilityRunner:
                     "failed", f"unsupported capability: {operation.capability}"
                 )
             handler = getattr(self, definition.handler_name)
+            # Recon already caps its own deadline at 20 seconds; preserve that
+            # existing clamping contract rather than changing its outcome.
+            if (operation.deadline - operation.requested_at > 30 and operation.capability != "character.recon"
+                    and operation.capability != "travel.go2"
+                    and self._refuge_controller(operation) is None):
+                raise _OperationAbort("failed", "only refuge outings and direct travel can extend the existing 30-second operation envelope")
             explanation = handler(operation)
             operation.explanation = explanation
-            self._finish(operation, "succeeded", operation.explanation)
+            # Resolve the final stop/success race while the same lock still
+            # protects interruption admission. Ordinary capabilities are unchanged.
+            with self._lock:
+                if self.is_test_operation(operation):
+                    self._check_test_stop(operation)
+                elif operation.operation_id in self._controller_actions or operation.capability == "travel.go2":
+                    self._check_deadline_and_interruption(operation)
+                    if operation.operation_id in self._graceful_stops:
+                        raise _OperationAbort("interrupted", "test stopped; return to refuge and equipment recovery verified")
+                self._finish(operation, "succeeded", operation.explanation)
             return operation
         except _OperationAbort as error:
             abort = error
@@ -539,6 +605,7 @@ class CapabilityRunner:
             )
 
         assert abort is not None
+        self._stop_test_action(operation)
         try:
             self._safe_cleanup(operation, allow_commands=abort.status != "timed_out")
         except Exception as error:
@@ -605,9 +672,132 @@ class CapabilityRunner:
     def interrupt(self, operation_id: str) -> None:
         operation = self.get(operation_id)
         with self._lock:
+            if operation.status in TERMINAL_OPERATION_STATES:
+                return
+            owned = self._controller_actions.get(operation_id)
+            if owned is not None and self._refuge_controller(operation) is not None:
+                launch = self._actions.get(owned[0])
+                if launch["status"] in {"dispatched", "completed"}:
+                    try:
+                        self._actions.request_controller_return(owned[0], character=operation.character,
+                                                                generation=owned[1])
+                    except ValidationError:
+                        # Hard revocation, replacement session or expiry cannot
+                        # be revived to perform even a return movement.
+                        pass
+                    else:
+                        self._graceful_stops.add(operation_id)
+                        self._cancel_controller_controls(operation, revoke_run=False)
+                        self._emit_locked(operation, operation.status, "stop requested; bounded local return to refuge pending")
+                        return
             if operation.status not in TERMINAL_OPERATION_STATES:
                 self._interruptions.add(operation_id)
         self._cancel_recon_action(operation)
+        self._cancel_travel_action(operation)
+        self._stop_test_action(operation)
+        self._cancel_controller_controls(operation)
+
+    def control_controller(
+        self, operation_id: str, *, character: str, expected_generation: str, control: str,
+    ) -> dict[str, Any]:
+        """Queue one registered control on an exact existing operation, never a new owner.
+
+        The response is broker admission only. Neither queued nor dispatched
+        establishes application, command effectiveness, or safe handoff.
+        """
+        if not isinstance(control, str) or control not in CONTROLLER_CONTROLS:
+            raise ValidationError("unsupported controller control")
+        if not isinstance(character, str) or not isinstance(expected_generation, str):
+            raise ValidationError("control requires exact character and generation strings")
+        operation = self.get(operation_id)
+        with self._lock:
+            owned = self._controller_actions.get(operation_id)
+            if (operation.character.casefold() != character.casefold()
+                    or owned is None or expected_generation != owned[1]):
+                raise ValidationError("control does not match an active controller operation")
+            if (operation.status in TERMINAL_OPERATION_STATES
+                    or operation_id in self._interruptions
+                    or (operation_id in self._graceful_stops and control != "status")
+                    or self._clock() >= operation.deadline):
+                raise ValidationError("controller operation is no longer accepting controls")
+            controller = self._controller_manifest.controller(operation.capability.removeprefix("controller."))
+            action = controller.action(control)
+            if action.kind != "control":
+                raise ValidationError("control is not registered as an exact-run action")
+            launch = self._actions.get(owned[0])
+            if launch["status"] not in {"dispatched", "completed"}:
+                raise ValidationError("controller launch has not been dispatched")
+            try:
+                snapshot = self._require_fresh_session(operation, expected_generation=owned[1])
+            except _OperationAbort as error:
+                raise ValidationError(error.detail) from error
+            if snapshot.owners is None or snapshot.scripts is None:
+                raise ValidationError("known controller ownership is required")
+            scripts = {name.casefold() for name in snapshot.scripts}
+            if controller.script.casefold() not in scripts:
+                raise ValidationError("the registered controller is not running")
+            allowed = {name.casefold() for name in controller.control_owner_scripts}
+            if scripts.intersection(name.casefold() for name in controller.owner_scripts) - allowed:
+                raise ValidationError("conflicting controller owner script is running")
+            for lane in controller.lanes:
+                owner = snapshot.owners.get(lane)
+                if not isinstance(owner, str) or owner.casefold() not in allowed:
+                    raise ValidationError(f"controller ownership is not verified in {lane}")
+            pending = self._controller_controls.setdefault(operation_id, set())
+            pending.intersection_update(
+                action_id for action_id in tuple(pending)
+                if self._actions.get(action_id)["expires_at"] > self._clock()
+            )
+            if len(pending) >= 32:
+                raise ValidationError("controller control queue is full")
+            command, _, _ = action.build({"run_id": owned[0]})
+            remaining = operation.deadline - self._clock()
+            if remaining <= 0:
+                raise ValidationError("controller operation expired before control admission")
+            admitted = self._actions.submit(ActionProposal(
+                character=operation.character, command=command,
+                expected_generation=owned[1], expected_room_id=snapshot.room_id,
+                ttl_seconds=max(1, min(5, math.ceil(remaining))),
+                deadline=min(operation.deadline, self._clock() + 5),
+            ))
+            pending.add(str(admitted["action_id"]))
+            self._emit_locked(operation, operation.status,
+                              f"{control} control admitted as {admitted['action_id']}; application unverified")
+            return {"operation_id": operation_id, "run_id": owned[0], "control": control,
+                    "applied": None, "action": admitted}
+
+    def _cancel_controller_controls(self, operation: OperationRecord, *, revoke_run: bool = True) -> None:
+        with self._lock:
+            owned = self._controller_actions.get(operation.operation_id)
+            if owned is None:
+                return
+            for action_id in self._controller_controls.pop(operation.operation_id, set()):
+                self._actions.revoke_controller_control(action_id, character=operation.character, generation=owned[1])
+            if revoke_run:
+                self._actions.revoke_controller_run(owned[0], character=operation.character, generation=owned[1])
+
+    def is_test_operation(self, operation: OperationRecord) -> bool:
+        if not operation.capability.startswith("controller."):
+            return False
+        try:
+            controller = self._controller_manifest.controller(operation.capability.removeprefix("controller."))
+        except ValidationError:
+            return False
+        return controller.test_suite is not None
+
+    def _stop_test_action(self, operation: OperationRecord) -> None:
+        with self._lock:
+            owned = self._test_actions.get(operation.operation_id)
+        if owned is not None:
+            action_id, generation = owned
+            self._actions.request_test_stop(action_id, character=operation.character, generation=generation)
+
+    def _check_test_stop(self, operation: OperationRecord) -> None:
+        self._check_deadline_and_interruption(operation)
+        with self._lock:
+            owned = self._test_actions.get(operation.operation_id)
+        if owned is not None and self._actions.get(owned[0]).get("stop_requested") is True:
+            raise _OperationAbort("interrupted", "test stop requested; no success is published")
 
     def _cancel_recon_action(self, operation: OperationRecord) -> None:
         with self._lock:
@@ -622,6 +812,63 @@ class CapabilityRunner:
             self._progress(operation, f"cancelled owned pending recon action {action_id}")
         elif result["status"] == "dispatched":
             self._raise_alert(operation, "recon was already dispatched; sent commands cannot be unsent")
+
+    def _cancel_travel_action(self, operation: OperationRecord) -> None:
+        with self._lock:
+            owned = self._travel_actions.get(operation.operation_id)
+        if owned is not None:
+            self._actions.cancel(owned[0], character=operation.character, generation=owned[1])
+
+    @staticmethod
+    def _validate_travel_state(snapshot: SessionState) -> None:
+        if snapshot.dead is not False or snapshot.stunned is not False:
+            raise _OperationAbort("failed", "travel requires verified survival and no stun")
+        if snapshot.scripts is None or snapshot.owners is None:
+            raise _OperationAbort("failed", "travel requires known script ownership")
+        if "go2" in {name.casefold() for name in snapshot.scripts}:
+            raise _OperationAbort("failed", "an existing go2 cannot be adopted or replaced")
+        if any(lane not in snapshot.owners or snapshot.owners[lane] is not None
+               for lane in ("movement", "combat", "inventory")):
+            raise _OperationAbort("failed", "travel requires released movement, combat and inventory owners")
+
+    def _execute_go2(self, operation: OperationRecord) -> str:
+        if set(operation.arguments) != {"destination"}:
+            raise _OperationAbort("failed", "travel requires only destination")
+        destination = operation.arguments["destination"]
+        if (not isinstance(destination, str) or re.fullmatch(r"[1-9][0-9]{0,9}", destination) is None
+                or destination == "4"):
+            raise _OperationAbort("failed", "destination must be an explicit positive room ID, not a special go2 selector")
+        if operation.expected_generation is None:
+            raise _OperationAbort("failed", "travel requires expected_generation")
+        if operation.deadline - operation.requested_at > 120:
+            raise _OperationAbort("failed", "travel is limited to 120 seconds")
+        start = self._require_fresh_session(operation)
+        operation.start_state = start
+        self._validate_travel_state(start)
+        hands = self._hand_ids(start)
+        with self._lock:
+            pending = self._refuge_pending.get(operation.character.casefold())
+        if pending and pending[2].generation != start.generation:
+            self._resolve_prior_refuge(operation, start)
+            with self._lock:
+                pending = self._refuge_pending.get(operation.character.casefold())
+        if pending and (pending[2].generation != start.generation
+                        or pending[1].safe_handoff["room_id"] != destination):
+            raise _OperationAbort("failed", "unresolved test handoff permits travel only to its original refuge in the same session")
+        self._admit_and_start(operation, admitted_detail="exact-destination travel admitted",
+                             running_detail="native go2 travel running")
+        action = self._run_broker_step(operation, start, GO2_ADAPTER.command("supervised_travel", destination=destination),
+                                       "traveling to the authorized destination")
+        end = self._require_fresh_session(operation, expected_generation=start.generation,
+                                          after_sequence=start.sequence)
+        self._validate_travel_state(end)
+        if end.room_id != destination or self._hand_ids(end) != hands:
+            raise _OperationAbort("failed", "destination arrival or original equipment was not verified")
+        if end.script_status is None or end.script_status.get("go2") != f"completed:{action['action_id']}":
+            raise _OperationAbort("failed", "exact go2 completion was not verified")
+        operation.end_state = end
+        self._resolve_prior_refuge(operation, end)
+        return "go2 arrival, original equipment and exact owner release verified"
 
     def _execute_item_audit(self, operation: OperationRecord) -> str:
         methods = self._parse_item_audit_arguments(operation.arguments)
@@ -807,6 +1054,187 @@ class CapabilityRunner:
         operation.end_state = end
         return "ELoot completion and removal of every starting exact corpse ID verified"
 
+    def _execute_controller_recovery(self, operation: OperationRecord) -> str:
+        if set(operation.arguments) != {"action_id", "confirm"}:
+            raise _OperationAbort(
+                "failed", "controller recovery requires only action_id and confirm"
+            )
+        action_id = operation.arguments.get("action_id")
+        if (
+            not isinstance(action_id, str)
+            or re.fullmatch(r"[0-9a-f]{16}", action_id) is None
+            or operation.arguments.get("confirm") is not True
+        ):
+            raise _OperationAbort(
+                "failed", "controller recovery requires an exact action ID and confirm=true"
+            )
+        if operation.expected_generation is None:
+            raise _OperationAbort(
+                "failed", "controller recovery requires expected_generation at admission"
+            )
+
+        with self._lock:
+            pending = self._refuge_pending.get(operation.character.casefold())
+        if pending is not None and action_id != pending[3]:
+            raise _OperationAbort(
+                "failed", "action_id does not match this character's unresolved handoff"
+            )
+
+        start = self._require_fresh_session(operation)
+        operation.start_state = start
+        if pending is None:
+            self._validate_recovery_candidate_start(start)
+        else:
+            _previous_operation_id, controller, original, _pending_action_id = pending
+            self._validate_controller_start(start, controller)
+            if self._hand_ids(start) != self._hand_ids(original):
+                raise _OperationAbort(
+                    "failed", "controller recovery requires the original held equipment"
+                )
+        self._admit_and_start(
+            operation,
+            admitted_detail="exact unresolved controller handoff and current safe state verified",
+            running_detail="operator-confirmed recovery acknowledgement running in owning session",
+        )
+        self._run_broker_step(
+            operation,
+            start,
+            f"lab recover {action_id} confirm",
+            "acknowledging exact controller recovery",
+        )
+        end = self._require_fresh_session(
+            operation,
+            expected_generation=start.generation,
+            after_sequence=start.sequence,
+        )
+        receipt_reader = getattr(self._evidence, "controller_recovery_receipt", None)
+        receipt = None if receipt_reader is None else receipt_reader(
+            character=operation.character,
+            generation=end.generation,
+            action_id=action_id,
+        )
+        if not isinstance(receipt, Mapping):
+            raise _OperationAbort(
+                "failed", "owning session did not publish matching controller recovery evidence"
+            )
+        controller_name = receipt.get("controller")
+        previous_generation = receipt.get("previous_generation")
+        room_id = receipt.get("room_id")
+        receipt_hands = receipt.get("hands")
+        if (
+            not isinstance(controller_name, str)
+            or not controller_name
+            or receipt.get("action_id") != action_id
+            or not isinstance(previous_generation, str)
+            or not previous_generation
+            or receipt.get("operator_confirmed") is not True
+            or not isinstance(room_id, str)
+            or not isinstance(receipt_hands, Mapping)
+            or set(receipt_hands) != {"left", "right"}
+            or any(
+                item is not None and (not isinstance(item, str) or not item)
+                for item in receipt_hands.values()
+            )
+        ):
+            raise _OperationAbort(
+                "failed", "owning session published malformed controller recovery evidence"
+            )
+        try:
+            controller = self._controller_manifest.controller(controller_name)
+        except (ValidationError, KeyError) as error:
+            raise _OperationAbort(
+                "failed", "recovery evidence names an unregistered controller"
+            ) from error
+        if (
+            not controller.available_for(operation.character)
+            or controller.safe_handoff["kind"]
+            not in {"quick_refuge", "controller_refuge"}
+            or room_id != controller.safe_handoff["room_id"]
+        ):
+            raise _OperationAbort(
+                "failed", "recovery evidence does not match this character's registered refuge controller"
+            )
+        if pending is not None and (
+            controller.name != pending[1].name
+            or previous_generation != pending[2].generation
+            or (receipt_hands.get("left"), receipt_hands.get("right"))
+            != self._hand_ids(pending[2])
+        ):
+            raise _OperationAbort(
+                "failed", "recovery evidence does not match the retained controller handoff"
+            )
+        self._validate_controller_start(end, controller)
+        if self._hand_ids(end) != (
+            receipt_hands.get("left"),
+            receipt_hands.get("right"),
+        ):
+            raise _OperationAbort(
+                "failed", "controller recovery changed the original held equipment"
+            )
+        with self._lock:
+            current = self._refuge_pending.get(operation.character.casefold())
+            if pending is not None and current != pending:
+                raise _OperationAbort(
+                    "failed", "unresolved controller handoff changed during recovery"
+                )
+            if pending is not None:
+                self._refuge_pending.pop(operation.character.casefold())
+        operation.end_state = end
+        return "Owning session acknowledged the exact failed run; safe state, equipment, owner release and recovery evidence verified"
+
+    def _execute_session_command(self, operation: OperationRecord) -> str:
+        if set(operation.arguments) != {"command"}:
+            raise _OperationAbort("failed", "session.command accepts only command")
+        command = operation.arguments.get("command")
+        try:
+            command = normalize_full_access_command(command)
+        except ValidationError as error:
+            raise _OperationAbort("failed", str(error)) from error
+
+        start = self._require_fresh_session(operation)
+        operation.start_state = start
+        if not isinstance(start.script_status, Mapping) or start.script_status.get("lab-access") != "full":
+            raise _OperationAbort("failed", "local LAB full access is not enabled for this session")
+        self._admit_and_start(
+            operation,
+            admitted_detail="local full-access grant and current session admitted",
+            running_detail="single session-command delivery running",
+        )
+        action = self._run_broker_step(
+            operation,
+            start,
+            f"lab direct {command}",
+            "sending locally authorized session command",
+        )
+        end = self._require_fresh_session(
+            operation,
+            expected_generation=start.generation,
+            after_sequence=start.sequence,
+        )
+        expected_status = f"completed:{action['action_id']}"
+        if not isinstance(end.script_status, Mapping) or end.script_status.get("lab-direct") != expected_status:
+            raise _OperationAbort("failed", "native session-command delivery receipt was not observed")
+        operation.end_state = end
+        return "native session verified command delivery; requested effect remains unverified"
+
+    @staticmethod
+    def _validate_recovery_candidate_start(snapshot: SessionState) -> None:
+        if snapshot.dead is not False or snapshot.stunned is not False:
+            raise _OperationAbort(
+                "failed", "controller recovery requires known alive and unstunned state"
+            )
+        CapabilityRunner._hand_ids(snapshot)
+        if snapshot.owners is None or any(
+            owner is not None for owner in snapshot.owners.values()
+        ):
+            raise _OperationAbort(
+                "failed", "controller recovery requires every published owner lane released"
+            )
+        if snapshot.scripts is None:
+            raise _OperationAbort(
+                "failed", "controller recovery requires known script ownership"
+            )
+
     def _execute_controller(self, operation: OperationRecord) -> str:
         controller_name = operation.capability.removeprefix("controller.")
         controller = self._controller_manifest.controller(controller_name)
@@ -818,10 +1246,29 @@ class CapabilityRunner:
         action = controller.action(controller.capability_action)
         command, _script_args, normalized = action.build(operation.arguments)
         operation.arguments = normalized
+        refuge = controller.safe_handoff["kind"] in {"quick_refuge", "controller_refuge"}
+        quick_launch = controller.script == "bigshot" and (
+            bool(controller.control_owner_scripts) or _script_args.casefold().split()[:1] == ["quick"])
+        if controller.safe_handoff["kind"] == "quick_area" or (quick_launch and not refuge):
+            raise _OperationAbort("failed", "controlled Quick tests require quick_refuge; migrate the field-only handoff")
+        if refuge:
+            if operation.expected_generation is None:
+                raise _OperationAbort("failed", "refuge tests require expected_generation at admission")
+            if operation.deadline - operation.requested_at > 300:
+                raise _OperationAbort("failed", "refuge tests are limited to 300 seconds including recovery and return")
+            if operation.deadline - self._clock() <= controller.safe_handoff["return_seconds"] + 12:
+                raise _OperationAbort("failed", "insufficient time for work, equipment recovery and reserved return")
+        if controller.test_suite is not None and operation.expected_generation is None:
+            raise _OperationAbort("failed", "test runs require expected_generation at admission")
+        if controller.test_suite is not None and operation.deadline - operation.requested_at > 30:
+            raise _OperationAbort("failed", "test runs are limited to the existing 30-second envelope")
 
         start = self._require_fresh_session(operation)
         operation.start_state = start
+        self._resolve_prior_refuge(operation, start)
         self._validate_controller_start(start, controller)
+        if controller.test_suite is not None:
+            self._validate_test_state(start, controller)
         registration = self._evidence.register_controller(
             operation.operation_id,
             controller.name,
@@ -840,27 +1287,57 @@ class CapabilityRunner:
             minimum_sequence=start.sequence,
         )
         self._validate_controller_start(current, controller)
-        broker_result = self._run_broker_step(
-            operation,
-            current,
-            command,
-            f"starting registered {controller.name} controller",
-        )
+        if refuge and self._hand_ids(current) != self._hand_ids(start):
+            raise _OperationAbort("failed", "equipment changed before refuge launch")
+        if controller.test_suite is not None:
+            self._validate_test_state(current, controller)
+        broker_error = None
+        try:
+            broker_result = self._run_broker_step(
+                operation,
+                current,
+                command,
+                f"starting registered {controller.name} controller",
+            )
+        except _OperationAbort as error:
+            if controller.test_suite is None and not refuge:
+                raise
+            with self._lock:
+                owned = (self._controller_actions if refuge else self._test_actions).get(operation.operation_id)
+            if owned is None:
+                raise
+            broker_result = self._actions.get(owned[0])
+            if broker_result["status"] not in {"dispatched", "completed", "failed"}:
+                raise
+            # A failed acknowledgement can follow an already published report.
+            # Drain only evidence currently available; do not extend execution.
+            broker_error = error
         action_id = str(broker_result.get("action_id", ""))
         remaining = operation.deadline - self._clock()
-        if remaining <= 0:
+        if remaining <= 0 and controller.test_suite is None and not refuge:
             raise _OperationAbort(
                 "timed_out", "operation timed out waiting for controller result"
             )
         evidence = self._evidence.verify_controller(
             registration,
             action_id,
-            remaining,
+            max(0.0, remaining) if broker_error is None else 0.0,
         )
         if evidence is None:
+            if controller.test_suite is not None:
+                self._check_test_stop(operation)
+            if broker_error is not None:
+                raise broker_error
             raise _OperationAbort(
                 "failed", "registered controller result evidence was not observed"
             )
+        if controller.test_suite is not None:
+            explanation = self._complete_test_controller(operation, controller, evidence, action_id, current)
+            if broker_error is not None:
+                raise broker_error
+            return explanation
+        if refuge:
+            return self._complete_refuge_controller(operation, controller, evidence, action_id, current, broker_error)
         self._verify_controller_evidence(
             evidence,
             controller=controller,
@@ -878,12 +1355,140 @@ class CapabilityRunner:
             expected_generation=start.generation,
             after_sequence=current.sequence,
         )
-        self._verify_controller_handoff(end, controller, operation.arguments)
+        self._verify_controller_handoff(end, controller, operation.arguments,
+                                        evidence=evidence, launch_room_id=current.room_id)
         operation.end_state = end
+        if controller.safe_handoff["kind"] == "quick_area":
+            return f"{controller.name} bounded field handoff and owner release verified"
         return (
             f"{controller.name} controller reported {evidence.facts['code']} and "
             "safe owner release was verified"
         )
+
+    def _refuge_controller(self, operation):
+        if not operation.capability.startswith("controller."):
+            return None
+        controller = self._controller_manifest.controller(operation.capability.removeprefix("controller."))
+        return controller if controller.safe_handoff["kind"] in {"quick_refuge", "controller_refuge"} else None
+
+    @staticmethod
+    def _hand_ids(snapshot):
+        hands = snapshot.hands
+        if hands is None or "left" not in hands or "right" not in hands:
+            raise _OperationAbort("failed", "refuge tests require both hand identities to be known")
+        result = []
+        for hand in ("left", "right"):
+            item = hands[hand]
+            if item is not None and (not isinstance(item, HandItem) or not item.object_id):
+                raise _OperationAbort("failed", "refuge tests require exact held-item identities")
+            result.append(None if item is None else item.object_id)
+        return tuple(result)
+
+    def _resolve_prior_refuge(self, operation, snapshot):
+        with self._lock:
+            pending = self._refuge_pending.get(operation.character.casefold())
+            if pending is None:
+                return
+            _, controller, original, action_id = pending
+            changed_generation = snapshot.generation != original.generation
+            if changed_generation:
+                verify = getattr(self._evidence, "verify_controller_recovery", None)
+                if verify is None or verify(character=operation.character, controller=controller.name,
+                        previous_generation=original.generation, generation=snapshot.generation,
+                        action_id=action_id, room_id=controller.safe_handoff["room_id"],
+                        hands=self._hand_ids(original)) is not True:
+                    raise _OperationAbort("failed", "unresolved refuge handoff belongs to a previous session; use ;lab recover RUN_ID confirm after restoring safety")
+            self._validate_controller_start(snapshot, controller)
+            if (snapshot.sequence is None or original.sequence is None or (not changed_generation and snapshot.sequence <= original.sequence)
+                    or self._hand_ids(snapshot) != self._hand_ids(original)):
+                raise _OperationAbort("failed", "previous refuge handoff still needs fresh equipment and owner resolution")
+            self._refuge_pending.pop(operation.character.casefold())
+
+    def _complete_refuge_controller(self, operation, controller, evidence, action_id, before, broker_error):
+        self._verify_controller_evidence(evidence, controller=controller, generation=before.generation,
+                                         action_id=action_id, require_success=False)
+        operation.evidence.append(evidence)
+        end = self._require_fresh_session(operation, expected_generation=before.generation,
+                                          after_sequence=before.sequence)
+        operation.end_state = end
+        facts = evidence.facts
+        details = facts["details"]
+        if (broker_error is not None and facts["ok"] is False
+                and facts["code"] == "controlled_start_rejected"
+                and details.get("run_id") == action_id
+                and details.get("child_started") is False
+                and details.get("cleanup_complete") is True
+                and details.get("effects_verified") is False):
+            self._validate_controller_start(end, controller)
+            if self._hand_ids(end) != self._hand_ids(before):
+                raise _OperationAbort("failed", "native preflight rejected but held equipment changed")
+            with self._lock:
+                pending = self._refuge_pending.get(operation.character.casefold())
+                if pending is not None and pending[0] == operation.operation_id:
+                    self._refuge_pending.pop(operation.character.casefold())
+            self._progress(operation, "native preflight rejection and unchanged refuge state verified")
+            raise _OperationAbort("failed", f"controller preflight rejected before child launch: {facts['message']}")
+        self._verify_controller_handoff(end, controller, operation.arguments, evidence=evidence)
+        if self._hand_ids(end) != self._hand_ids(before):
+            raise _OperationAbort("failed", "refuge reached but original hand equipment was not restored")
+        with self._lock:
+            pending = self._refuge_pending.get(operation.character.casefold())
+            if pending is not None and pending[0] == operation.operation_id:
+                self._refuge_pending.pop(operation.character.casefold())
+            stopped = operation.operation_id in self._graceful_stops
+        self._progress(operation, "return to refuge, exact equipment and owner release verified")
+        if stopped:
+            raise _OperationAbort("interrupted", "test stopped; return to refuge and equipment recovery verified")
+        if broker_error is not None:
+            raise broker_error
+        runtime = evidence.facts["details"]["runtime"]
+        if (evidence.facts["ok"] is not True or runtime["state"] != "completed"
+                or runtime["work_result"].get("state") != "completed"):
+            raise _OperationAbort("failed", f"test work failed; safe return verified: {evidence.facts['code']}")
+        return "Controlled outing completed; return to refuge, original equipment and owner release verified"
+
+    def _complete_test_controller(self, operation, controller, evidence, action_id, before):
+        # Retain attributed terminal reports even when assertions, cleanup, or
+        # cancellation make the operation a non-success.
+        self._verify_controller_evidence(evidence, controller=controller,
+                                         generation=before.generation, action_id=action_id,
+                                         require_success=False)
+        operation.evidence.append(evidence)
+        details = evidence.facts["details"]
+        if (details.get("suite_id") != controller.name.removeprefix("test-")
+                or details.get("revision") != operation.arguments["revision"]
+                or details.get("case_id") != operation.arguments["case_id"]
+                or details.get("status") not in {"passed", "failed", "skipped", "inconclusive"}
+                or not isinstance(details.get("assertions_passed"), bool)
+                or not isinstance(details.get("cleanup_complete"), bool)
+                or not isinstance(details.get("report_path"), str)
+                or not details["report_path"].strip() or len(details["report_path"]) > 1024):
+            raise _OperationAbort("failed", "test result identity or summary did not match the pinned run")
+        if not details["cleanup_complete"]:
+            self._raise_alert(operation, "test cleanup is incomplete; local exclusion requires operator resolution")
+            raise _OperationAbort("failed", "test cleanup was not verified complete")
+        end = self._require_fresh_session(operation, expected_generation=before.generation,
+                                          after_sequence=before.sequence)
+        operation.end_state = end
+        self._verify_controller_handoff(end, controller, operation.arguments)
+        self._validate_test_state(end, controller)
+        self._check_test_stop(operation)
+        if (evidence.facts["ok"] is not True or details["status"] != "passed"
+                or not details["assertions_passed"]):
+            raise _OperationAbort("failed", f"test suite reported {details['status']}: {evidence.facts['message']}")
+        return "Pinned test assertions passed and same-room cleanup was verified"
+
+    @staticmethod
+    def _validate_test_state(snapshot, controller):
+        if snapshot.room_id != controller.safe_room({}):
+            raise _OperationAbort("failed", "test requires the registered allowed room")
+        if snapshot.dead is not False or snapshot.stunned is not False:
+            raise _OperationAbort("failed", "test requires known alive and unstunned state")
+        if snapshot.scripts is None:
+            raise _OperationAbort("failed", "test requires known script ownership")
+        running = {name.casefold() for name in snapshot.scripts}
+        if running.intersection(name.casefold() for name in controller.owner_scripts):
+            raise _OperationAbort("failed", "test owner scripts have not exited")
 
     @staticmethod
     def _validate_controller_start(
@@ -903,6 +1508,13 @@ class CapabilityRunner:
                 raise _OperationAbort(
                     "failed", f"ownership conflict in {lane}: {owner}"
                 )
+        if controller.safe_handoff["kind"] in {"quick_refuge", "controller_refuge"}:
+            if snapshot.room_id != controller.safe_room({}):
+                raise _OperationAbort("failed", "refuge test must begin in the registered safe room")
+            CapabilityRunner._hand_ids(snapshot)
+            if snapshot.scripts is None or set(name.casefold() for name in snapshot.scripts).intersection(
+                    name.casefold() for name in controller.owner_scripts):
+                raise _OperationAbort("failed", "refuge test requires known, exited controller owner scripts")
 
     @staticmethod
     def _verify_controller_evidence(
@@ -911,6 +1523,7 @@ class CapabilityRunner:
         controller: ControllerDefinition,
         generation: str,
         action_id: str,
+        require_success: bool = True,
     ) -> None:
         if (
             evidence.method != f"controller.{controller.name}"
@@ -929,7 +1542,7 @@ class CapabilityRunner:
             or not isinstance(facts.get("details"), Mapping)
         ):
             raise _OperationAbort("failed", "controller result evidence is malformed")
-        if facts["ok"] is not True:
+        if require_success and facts["ok"] is not True:
             raise _OperationAbort(
                 "failed", f"controller failed: {facts['code']}: {facts['message']}"
             )
@@ -939,6 +1552,9 @@ class CapabilityRunner:
         snapshot: SessionState,
         controller: ControllerDefinition,
         arguments: Mapping[str, object],
+        *,
+        evidence: EvidenceRecord | None = None,
+        launch_room_id: str | None = None,
     ) -> None:
         if snapshot.owners is None:
             raise _OperationAbort("failed", "post-state ownership is unknown")
@@ -957,6 +1573,42 @@ class CapabilityRunner:
                 "failed",
                 f"controller did not return to safe room {safe_room}",
             )
+        if controller.safe_handoff["kind"] in {"quick_refuge", "controller_refuge"}:
+            CapabilityRunner._validate_controller_start(snapshot, controller)
+            details = evidence.facts.get("details", {}) if evidence is not None else {}
+            runtime = details.get("runtime")
+            refuge = runtime.get("refuge") if isinstance(runtime, Mapping) else None
+            if (evidence is None or details.get("run_id") != evidence.action_id
+                    or details.get("cleanup_complete") is not True
+                    or not isinstance(runtime, Mapping) or runtime.get("state") not in {"completed", "stopped"}
+                    or not isinstance(runtime.get("work_result"), Mapping)
+                    or not isinstance(refuge, Mapping) or type(refuge.get("room_id")) is not int
+                    or str(refuge["room_id"]) != safe_room
+                    or refuge.get("phase") != "finished"
+                    or refuge.get("returned") is not True or refuge.get("equipment_restored") is not True):
+                raise _OperationAbort("failed", "refuge handoff lacks matching terminal return and equipment proof")
+        if controller.safe_handoff["kind"] == "quick_area":
+            if snapshot.dead is not False or snapshot.stunned is not False:
+                raise _OperationAbort("failed", "bounded field handoff requires alive and unstunned state")
+            details = evidence.facts.get("details", {}) if evidence is not None else {}
+            runtime = details.get("runtime")
+            area = runtime.get("area") if isinstance(runtime, Mapping) else None
+            if (evidence is None or details.get("run_id") != evidence.action_id
+                    or details.get("cleanup_complete") is not True
+                    or not isinstance(runtime, Mapping) or runtime.get("state") not in {"completed", "stopped"}
+                    or runtime.get("mode") not in {"watch", "assist", "seek", "clear", "trial"}
+                    or not isinstance(area, Mapping) or area.get("kind") != "profile"
+                    or area.get("in_bounds") is not True
+                    or type(area.get("room_id")) is not int or str(area["room_id"]) != snapshot.room_id
+                    or type(area.get("start_room_id")) is not int
+                    or type(area.get("room_count")) is not int or area["room_count"] <= 0
+                    or not isinstance(area.get("boundary_room_ids"), list)
+                    or any(type(room) is not int for room in area["boundary_room_ids"])
+                    or (runtime["mode"] in {"clear", "trial"} and snapshot.room_id != launch_room_id)):
+                raise _OperationAbort("failed", "bounded field handoff lacks matching exact-run terminal area proof")
+            if snapshot.scripts is None or set(name.casefold() for name in snapshot.scripts).intersection(
+                    name.casefold() for name in controller.owner_scripts):
+                raise _OperationAbort("failed", "bounded field handoff requires controller owner scripts to exit")
 
     def _admit_and_start(
         self,
@@ -1327,6 +1979,10 @@ class CapabilityRunner:
             # recon operation, including fractional request deadlines.
             ttl = min(120, math.floor(remaining))
         try:
+            controlled_launch = isinstance(command, str) and self._controller_manifest.match_command(command)
+            controlled_launch = bool(controlled_launch and controlled_launch.action.kind == "launch"
+                                     and controlled_launch.controller.control_owner_scripts
+                                     and operation.capability == f"controller.{controlled_launch.controller.name}")
             action = self._actions.submit(
                 ActionProposal(
                     character=operation.character,
@@ -1335,19 +1991,48 @@ class CapabilityRunner:
                     expected_room_id=snapshot.room_id,
                     expected_generation=snapshot.generation,
                     ttl_seconds=ttl,
+                    deadline=operation.deadline if self.is_test_operation(operation) or operation.capability == "travel.go2" else None,
+                    controller_deadline=operation.deadline if controlled_launch else None,
                 )
             )
         except ValidationError as error:
             raise _OperationAbort("failed", f"broker denied {detail}: {error}") from error
         recon = operation.capability == "character.recon"
+        travel = operation.capability == "travel.go2"
+        if travel:
+            with self._lock:
+                self._travel_actions[operation.operation_id] = (str(action["action_id"]), snapshot.generation)
+        test_run = self.is_test_operation(operation)
         if recon:
             with self._lock:
                 self._recon_actions[operation.operation_id] = (str(action["action_id"]), snapshot.generation)
+        if test_run:
+            with self._lock:
+                self._test_actions[operation.operation_id] = (str(action["action_id"]), snapshot.generation)
+        controller_match = self._controller_manifest.match_command(command) if isinstance(command, str) else None
+        if (controller_match is not None and controller_match.action.kind == "launch"
+                and controller_match.controller.control_owner_scripts
+                and operation.capability == f"controller.{controller_match.controller.name}"):
+            with self._lock:
+                self._controller_actions.setdefault(operation.operation_id, (str(action["action_id"]), snapshot.generation))
+                if controller_match.controller.safe_handoff["kind"] in {"quick_refuge", "controller_refuge"}:
+                    self._refuge_pending[operation.character.casefold()] = (
+                        operation.operation_id, controller_match.controller, snapshot, str(action["action_id"]))
+                if operation.operation_id in self._interruptions or self._clock() >= operation.deadline:
+                    self._actions.revoke_controller_run(str(action["action_id"]), character=operation.character,
+                                                        generation=snapshot.generation)
         try:
             # An interrupt can arrive while submit is returning, before its ID
             # can be associated with the operation. Recheck before dispatch.
-            if recon:
+            if recon or travel:
                 self._check_deadline_and_interruption(operation)
+            if test_run:
+                with self._lock:
+                    stopped = operation.operation_id in self._interruptions
+                if stopped or self._clock() >= operation.deadline:
+                    self._stop_test_action(operation)
+                    if self._actions.get(str(action["action_id"]))["status"] == "cancelled":
+                        self._check_deadline_and_interruption(operation)
             self._progress(operation, f"broker admitted action {action['action_id']}: {detail}")
             if self._step_hook is not None:
                 self._step_hook(self._actions, action, snapshot)
@@ -1363,10 +2048,18 @@ class CapabilityRunner:
                     )
                     return result
                 if status in {"failed", "expired", "cancelled", "denied_stale_room"}:
+                    if test_run:
+                        self._check_deadline_and_interruption(operation)
                     raise _OperationAbort("failed", f"broker action {status}: {detail}")
-                self._check_deadline_and_interruption(operation, allow_interrupt=not cleanup)
+                self._check_deadline_and_interruption(operation, allow_interrupt=not cleanup and not test_run)
                 self._sleeper(self._action_poll_interval)
         finally:
+            if travel:
+                try:
+                    self._cancel_travel_action(operation)
+                finally:
+                    with self._lock:
+                        self._travel_actions.pop(operation.operation_id, None)
             if recon:
                 try:
                     self._cancel_recon_action(operation)
@@ -1560,8 +2253,18 @@ class CapabilityRunner:
             self._emit_locked(operation, operation.status, detail)
 
     def _finish(self, operation: OperationRecord, status: str, detail: str) -> None:
+        with self._lock:
+            if operation.capability == "travel.go2" and status != "succeeded":
+                self._raise_alert(operation, "Travel did not complete successfully; verify current location and ownership before further action.")
+            pending = self._refuge_pending.get(operation.character.casefold())
+            if pending is not None and pending[0] == operation.operation_id:
+                self._raise_alert(operation, "UNSAFE HANDOFF: refuge, equipment and owner release unverified; operator assistance required before another test")
         operation.ended_at = self._clock()
         self._transition(operation, status, detail)
+        with self._lock:
+            self._cancel_controller_controls(operation, revoke_run=status != "succeeded")
+            self._controller_actions.pop(operation.operation_id, None)
+            self._test_actions.pop(operation.operation_id, None)
         emit_timing(
             self._timing,
             "operation.end_to_end_ms",

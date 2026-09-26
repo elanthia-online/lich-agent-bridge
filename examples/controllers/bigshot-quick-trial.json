@@ -1,0 +1,121 @@
+{
+  "version": 1,
+  "controllers": [
+    {
+      "name": "quick-trial",
+      "script": "bigshot",
+      "summary": "Opt-in named Quick trial with bounded profile-area outing and verified refuge return. Edit synthetic character, sequence and refuge before registration.",
+      "characters": [
+        "Testmage"
+      ],
+      "result_global": "$lab_quick_result",
+      "lanes": [
+        "movement",
+        "combat"
+      ],
+      "owner_scripts": [
+        "bigshot",
+        "go2"
+      ],
+      "control_owner_scripts": [
+        "bigshot"
+      ],
+      "safe_handoff": {
+        "kind": "quick_refuge",
+        "room_id": "1000",
+        "return_seconds": 30
+      },
+      "capability_action": "start",
+      "actions": [
+        {
+          "name": "start",
+          "kind": "launch",
+          "launch_mode": "start",
+          "command_template": "bigshot quick trial {sequence} --target {target_id} --area profile",
+          "script_args_template": "quick trial {sequence} --target {target_id} --area profile",
+          "parameters": [
+            {
+              "name": "sequence",
+              "type": "enum",
+              "values": [
+                "probe-sequence"
+              ]
+            },
+            {
+              "name": "target_id",
+              "type": "numeric"
+            }
+          ],
+          "policy": {
+            "category": "combat",
+            "confirmation_required": true
+          }
+        },
+        {
+          "name": "status",
+          "kind": "control",
+          "command_template": "bigshot quick status {run_id}",
+          "script_args_template": "",
+          "parameters": [
+            {
+              "name": "run_id",
+              "type": "action_id"
+            }
+          ],
+          "policy": {
+            "category": "inspection",
+            "confirmation_required": false
+          }
+        },
+        {
+          "name": "hold",
+          "kind": "control",
+          "command_template": "bigshot quick hold {run_id}",
+          "script_args_template": "",
+          "parameters": [
+            {
+              "name": "run_id",
+              "type": "action_id"
+            }
+          ],
+          "policy": {
+            "category": "combat",
+            "confirmation_required": true
+          }
+        },
+        {
+          "name": "resume",
+          "kind": "control",
+          "command_template": "bigshot quick resume {run_id}",
+          "script_args_template": "",
+          "parameters": [
+            {
+              "name": "run_id",
+              "type": "action_id"
+            }
+          ],
+          "policy": {
+            "category": "combat",
+            "confirmation_required": true
+          }
+        },
+        {
+          "name": "retreat",
+          "kind": "control",
+          "command_template": "bigshot quick retreat {run_id}",
+          "script_args_template": "",
+          "parameters": [
+            {
+              "name": "run_id",
+              "type": "action_id"
+            }
+          ],
+          "policy": {
+            "category": "combat",
+            "confirmation_required": true
+          }
+        }
+      ]
+    }
+  ]
+}

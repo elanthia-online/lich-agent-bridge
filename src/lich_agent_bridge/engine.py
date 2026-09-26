@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from .context import ContextBuffer
 from .context_assembler import ContextAssembler
-from .errors import ModelError, QuestionBusy, QuestionCapacity
+from .errors import ModelError, QuestionBusy, QuestionCapacity, QuestionInvalidated
 from .evidence_loop import EvidenceLoop
 from .knowledge import KnowledgeBase, KnowledgeExcerpt, KnowledgeSourceDiagnostic
 from .protocol import Answer, AskRequest, Observation
@@ -137,6 +137,7 @@ class Copilot:
         max_concurrent_questions: int = 4,
         question_timeout_seconds: float | None = None,
         evidence_tools=None,
+        evidence_loop: EvidenceLoop | None = None,
     ):
         self._model = model
         self._context = context or ContextBuffer()
@@ -148,6 +149,7 @@ class Copilot:
             custom_instructions, evidence_enabled=evidence_tools is not None,
         )
         self._evidence_tools = evidence_tools
+        self._evidence_loop = evidence_loop or EvidenceLoop()
         self._dialogue = _DialogueMemory()
         self._answer_sources: OrderedDict[str, _AnswerSources] = OrderedDict()
         self._state_lock = RLock()
@@ -187,6 +189,9 @@ class Copilot:
         worker_started = False
         result: list[Any] = []
         with self._state_lock:
+            if (request.expected_generation is not None
+                    and self._generations.get(key) != request.expected_generation):
+                raise QuestionInvalidated("the requested character session is no longer current")
             if key in self._inflight:
                 raise QuestionBusy("a question is already running for this character")
             if len(self._inflight) >= self._max_concurrent_questions:
@@ -274,6 +279,7 @@ class Copilot:
                     knowledge_question=knowledge_question,
                     follow_up_question=prior_question,
                     dialogue_history=history,
+                    include_knowledge=self._evidence_tools is None,
                 )
                 rendered, surviving = assembled.render()
                 answer_sources = _AnswerSources(
@@ -287,9 +293,9 @@ class Copilot:
                     ),
                 )
             else:
-                knowledge, diagnostics = self._knowledge_search(
+                knowledge, diagnostics = (self._knowledge_search(
                     character=request.character, question=knowledge_question
-                )
+                ) if self._evidence_tools is None else ((), ()))
                 rendered = self._render_input(
                     request,
                     observations,
@@ -319,9 +325,13 @@ class Copilot:
         session = None
         try:
             if self._evidence_tools is not None:
-                session = self._evidence_tools.open(request.character, control)
-                gathered = EvidenceLoop().run(
-                    model=self._model, instructions=self._instructions,
+                session = (self._evidence_tools.open(request.character, control, read_only=True)
+                           if request.read_only else self._evidence_tools.open(request.character, control))
+                gathered = self._evidence_loop.run(
+                    model=self._model, instructions=(self._instructions +
+                        "\nThis question is read-only: no INFO/SKILLS refresh or other game commands are permitted. "
+                        "Use available observations and references; label missing or historical data."
+                        if request.read_only else self._instructions),
                     input_text=rendered, control=control, session=session,
                 )
                 text = gathered.text.strip()
@@ -344,7 +354,7 @@ class Copilot:
                 observed_event_count=len(observations),
                 sources=answer_sources.sources,
                 source_diagnostics=answer_sources.diagnostics,
-                capability="evidence_gathering" if self._evidence_tools is not None else "read_only",
+                capability="evidence_gathering" if self._evidence_tools is not None and not request.read_only else "read_only",
             )
             return answer, answer_sources
         finally:
