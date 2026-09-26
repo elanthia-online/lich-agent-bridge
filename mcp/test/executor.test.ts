@@ -36,7 +36,7 @@ test('execute_code chains and batches reads but returns only compact aggregation
     ]);
     return { room: (state.room as { id: string }).id, item_count: items.items.length, topics: knowledge.items.map((x: any) => x.title) };
   `, 'compact', hub);
-  assert.equal(result.success, true, result.error);
+  assert.equal(result.success, true, result.error ?? 'Executor returned failure without an error message');
   assert.deepEqual(result.result, { room: '42', item_count: 2, topics: ['Ensorcell', 'Necromancy'] });
   assert.equal(result.lab_calls, 3);
   assert.equal(typeof result.startup_time_ms, 'number');
@@ -52,7 +52,7 @@ test('bridge errors remain catchable inside the isolate with code and payload', 
     try { await lab.wikiSearch({ query: 'throw' }); return { caught: false }; }
     catch (error: any) { return { caught: true, message: error.message, code: error.code, query: error.payload.query }; }
   `, 'errors', new ExecutorHub());
-  assert.equal(result.success, true, result.error);
+  assert.equal(result.success, true, result.error ?? 'Executor returned failure without an error message');
   assert.deepEqual(result.result, { caught: true, message: 'bridge said no', code: 'bad_query', query: 'throw' });
   assert.equal(result.steps[0]?.success, false);
 });
@@ -75,7 +75,7 @@ test('observation watches overlap across characters and preserve independent cur
       return { character, cursor: page.cursor, timed_out: page.timed_out };
     }));
   `, 'parallel-watch', hub, { timeout_ms: 2000 });
-  assert.equal(result.success, true, result.error);
+  assert.equal(result.success, true, result.error ?? 'Executor returned failure without an error message');
   assert.equal(result.lab_calls, 3);
   assert.deepEqual(result.result, [
     { character: 'Testlead', cursor: '1', timed_out: true },
@@ -93,7 +93,7 @@ test('wall-clock jumps cannot prematurely expire executor dispatch or corrupt el
     await lab.snapshot({ character: 'Testmage' });
     return await lab.perform({ character: 'Testmage', capability: 'hunt.prepare' });
   `, 'monotonic-deadline', hub);
-  assert.equal(result.success, true, result.error);
+  assert.equal(result.success, true, result.error ?? 'Executor returned failure without an error message');
   assert.equal(hub.calls.length, 2);
   assert.ok(result.execution_time_ms >= 0 && result.execution_time_ms < 10_000);
 });
@@ -105,7 +105,7 @@ test('three sequential mutations and two parallel characters retain every operat
     await Promise.all(['Testmage', 'Testwarrior'].map(character => lab.perform({ character, capability: 'hunt.prepare' })));
     return 'complete';
   `, 'batch-perform', hub);
-  assert.equal(result.success, true, result.error);
+  assert.equal(result.success, true, result.error ?? 'Executor returned failure without an error message');
   assert.equal(hub.calls.filter((call) => call.route === 'perform').length, 5);
   assert.deepEqual(result.steps.map(step => step.operation_id), ['ticket-1', 'ticket-2', 'ticket-3', 'ticket-4', 'ticket-5']);
   assert.equal(result.steps[4].character, 'Testwarrior');
@@ -136,7 +136,7 @@ test('operation watches release synthetic character ownership before dependent p
     }
     return await Promise.all(['Testmage', 'Testwarrior'].map(character => lab.perform({ character, capability: 'hunt.prepare' })));
   `, 'owned-batch', hub);
-  assert.equal(result.success, true, result.error);
+  assert.equal(result.success, true, result.error ?? 'Executor returned failure without an error message');
   assert.equal(sequence, 5);
   assert.equal(maximumActive, 2);
   assert.equal(result.steps[0].operation_status, 'succeeded');
@@ -172,7 +172,7 @@ test('timeout metadata keeps 10s default and allows opt-in 30s; queued calls aft
     const hub = new ExecutorHub();
     for (const timeout_ms of [undefined, 30_000, 40_000]) {
       const result = await executeCode('return 1;', 'protocol', hub, { timeout_ms });
-      assert.equal(result.success, true, result.error);
+      assert.equal(result.success, true, result.error ?? 'Executor returned failure without an error message');
       assert.equal(result.result, timeout_ms === undefined ? 10_000 : 30_000);
       assert.equal(result.lab_calls, 0);
       assert.deepEqual(result.steps, []);
@@ -267,7 +267,7 @@ test('an already-started unawaited call settles before the operation result is r
   }
   const hub = new SlowHub();
   const result = await executeCode(`lab.snapshot({ character: 'Testmage' }); return 'selected';`, 'unawaited', hub);
-  assert.equal(result.success, true, result.error);
+  assert.equal(result.success, true, result.error ?? 'Executor returned failure without an error message');
   assert.equal(result.result, 'selected');
   assert.equal(hub.settled, true);
   assert.equal(result.steps[0]?.success, true);
@@ -280,7 +280,7 @@ test('recursive execute_code and long isolate watch are rejected and catchable',
     try { await lab.watch({ character: 'Testmage', timeout_ms: 5000 }); } catch (error: any) { errors.push(error.message); }
     return errors;
   `, 'exclusions', new ExecutorHub());
-  assert.equal(result.success, true, result.error);
+  assert.equal(result.success, true, result.error ?? 'Executor returned failure without an error message');
   assert.match((result.result as string[])[0], /Recursive/);
   assert.match((result.result as string[])[1], /direct lab.watch/);
 });
@@ -296,7 +296,7 @@ test('isolate has no filesystem, network, process, raw socket, terminal, or modu
       Bun: typeof (globalThis as any).Bun,
     };
   `, 'ambient', new ExecutorHub());
-  assert.equal(result.success, true, result.error);
+  assert.equal(result.success, true, result.error ?? 'Executor returned failure without an error message');
   assert.deepEqual(result.result, {
     process: 'undefined', require: 'undefined', fetch: 'undefined', WebSocket: 'undefined', Deno: 'undefined', Bun: 'undefined',
   });
