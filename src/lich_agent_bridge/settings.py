@@ -30,6 +30,7 @@ DEFAULT_OPENAI_MODEL = "gpt-5.6"
 DEFAULT_EVIDENCE_RESULT_CHARS = 12_000
 DEFAULT_EVIDENCE_TOTAL_CHARS = 36_000
 _MAX_CONFIG_BYTES = 1_048_576
+_MAX_DECISION_ENDPOINT_PATH_CHARS = 512
 _NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}\Z")
 _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _REASONING_EFFORTS = frozenset(
@@ -42,8 +43,23 @@ _TOP_LEVEL_KEYS = frozenset(
         "server",
         "knowledge",
         "storage",
+        "decisions",
         "providers",
         "profiles",
+    }
+)
+_DECISION_KEYS = frozenset(
+    {
+        "enabled",
+        "kind",
+        "base_url",
+        "endpoint_path",
+        "credential_env",
+        "model",
+        "timeout_seconds",
+        "player_interval_seconds",
+        "decision_ttl_seconds",
+        "audit_log",
     }
 )
 _SERVER_KEYS = frozenset({"host", "port", "mcp_port"})
@@ -109,6 +125,12 @@ class GeneralWebProvider(StrEnum):
     BRAVE = "brave"
 
 
+class DecisionProviderKind(StrEnum):
+    """Wire contract implemented by the fast-decision provider."""
+
+    SYSTEM_ONE = "system_one"
+
+
 @dataclass(frozen=True, slots=True)
 class ServerSettings:
     host: str
@@ -156,6 +178,20 @@ class StorageSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class DecisionSettings:
+    enabled: bool
+    kind: DecisionProviderKind
+    base_url: str
+    endpoint_path: str
+    credential_env: str | None
+    model: str
+    timeout_seconds: float
+    player_interval_seconds: float
+    decision_ttl_seconds: float
+    audit_log: Path
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderSettings:
     kind: ProviderKind
     command: str | None
@@ -185,6 +221,7 @@ class Settings:
     server: ServerSettings
     knowledge: KnowledgeSettings
     storage: StorageSettings
+    decisions: DecisionSettings
     providers: Mapping[str, ProviderSettings]
     profiles: Mapping[str, AgentProfile]
 
@@ -285,6 +322,18 @@ class Settings:
                 "audit_log": str(self.storage.audit_log),
                 "controller_manifest": str(self.storage.controller_manifest),
             },
+            "decisions": {
+                "enabled": self.decisions.enabled,
+                "kind": self.decisions.kind.value,
+                "base_url": self.decisions.base_url,
+                "endpoint_path": self.decisions.endpoint_path,
+                "credential_env": self.decisions.credential_env,
+                "model": self.decisions.model,
+                "timeout_seconds": self.decisions.timeout_seconds,
+                "player_interval_seconds": self.decisions.player_interval_seconds,
+                "decision_ttl_seconds": self.decisions.decision_ttl_seconds,
+                "audit_log": str(self.decisions.audit_log),
+            },
             "providers": {
                 name: {
                     "kind": provider.kind.value,
@@ -341,6 +390,16 @@ class Settings:
             writable["storage"]["action_token_file"] = None
         if self.storage.audit_log == self.storage.state_directory / "actions.jsonl":
             writable["storage"]["audit_log"] = None
+        if (
+            self.decisions.audit_log
+            == self.storage.state_directory / "decisions-shadow.jsonl"
+        ):
+            writable["decisions"]["audit_log"] = None
+        if self.decisions.credential_env is None:
+            # TOML has no null value.  An explicit empty string preserves a
+            # credential-free local provider instead of restoring the hosted
+            # default when this file is loaded again.
+            writable["decisions"]["credential_env"] = ""
         payload = _toml_document(writable).encode("utf-8")
         destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         descriptor, temporary_name = tempfile.mkstemp(
@@ -410,6 +469,18 @@ def _default_mapping(*, environment: Mapping[str, str]) -> dict[str, Any]:
             "action_token_file": None,
             "audit_log": None,
             "controller_manifest": None,
+        },
+        "decisions": {
+            "enabled": False,
+            "kind": DecisionProviderKind.SYSTEM_ONE.value,
+            "base_url": "https://api.typesafe.ai",
+            "endpoint_path": "/v1/systemone",
+            "credential_env": "JEV_API_KEY",
+            "model": "jev-1.13.0",
+            "timeout_seconds": 2.0,
+            "player_interval_seconds": 1.0,
+            "decision_ttl_seconds": 1.0,
+            "audit_log": None,
         },
         "providers": {
             "codex": {
@@ -514,6 +585,31 @@ def _environment_overrides(
     set_path("LAB_ACTION_TOKEN_FILE", "storage", "action_token_file")
     set_path("LAB_AUDIT_LOG", "storage", "audit_log")
     set_path("LAB_CONTROLLER_MANIFEST", "storage", "controller_manifest")
+    set_if(
+        "LAB_DECISIONS_ENABLED",
+        "decisions",
+        "enabled",
+        convert=lambda value: _environment_bool("LAB_DECISIONS_ENABLED", value),
+    )
+    set_if("LAB_JEV_BASE_URL", "decisions", "base_url")
+    set_if("LAB_DECISION_ENDPOINT_PATH", "decisions", "endpoint_path")
+    set_if("LAB_JEV_MODEL", "decisions", "model")
+    if "LAB_JEV_CREDENTIAL_ENV" in environment:
+        credential_env = environment["LAB_JEV_CREDENTIAL_ENV"].strip()
+        _set_nested(
+            result,
+            ("decisions", "credential_env"),
+            credential_env or None,
+        )
+    set_if("LAB_JEV_TIMEOUT", "decisions", "timeout_seconds", convert=float)
+    set_if(
+        "LAB_DECISION_PLAYER_INTERVAL",
+        "decisions",
+        "player_interval_seconds",
+        convert=float,
+    )
+    set_if("LAB_DECISION_TTL", "decisions", "decision_ttl_seconds", convert=float)
+    set_path("LAB_DECISION_AUDIT_LOG", "decisions", "audit_log")
 
     selected = environment.get("LAB_PROFILE", "").strip() or str(
         current.get("selected_profile", "default")
@@ -683,6 +779,77 @@ def _build_settings(
         if controller_value is None
         else _required_path(
             controller_value, "storage.controller_manifest", base, home
+        )
+    )
+
+    decisions_raw = _table(raw["decisions"], "decisions")
+    decision_enabled = _boolean(
+        decisions_raw.get("enabled"), "decisions.enabled"
+    )
+    decision_kind = _enum_value(
+        DecisionProviderKind, decisions_raw.get("kind"), "decisions.kind"
+    )
+    decision_base_url = _nonblank(
+        decisions_raw.get("base_url"), "decisions.base_url"
+    ).rstrip("/")
+    _validate_url(decision_base_url, "decisions.base_url")
+    parsed_decision_url = urlsplit(decision_base_url)
+    secure_remote = parsed_decision_url.scheme == "https"
+    local_http = (
+        parsed_decision_url.scheme == "http"
+        and _is_loopback_host(parsed_decision_url.hostname or "")
+    )
+    if not (secure_remote or local_http):
+        raise ConfigurationError(
+            "decisions.base_url must use HTTPS unless its HTTP host is loopback"
+        )
+    decision_endpoint_path = _decision_endpoint_path(
+        decisions_raw.get("endpoint_path"), "decisions.endpoint_path"
+    )
+    decision_credential_value = decisions_raw.get("credential_env")
+    if decision_credential_value is None or decision_credential_value == "":
+        decision_credential_env = None
+    else:
+        decision_credential_env = _nonblank(
+            decision_credential_value, "decisions.credential_env"
+        )
+    if (
+        decision_credential_env is not None
+        and not _ENVIRONMENT_NAME.fullmatch(decision_credential_env)
+    ):
+        raise ConfigurationError(
+            "decisions.credential_env must be an environment variable name"
+        )
+    decision_model = _nonblank(decisions_raw.get("model"), "decisions.model")
+    decision_timeout = _number(
+        decisions_raw.get("timeout_seconds"), "decisions.timeout_seconds"
+    )
+    if not 0.1 <= decision_timeout <= 10:
+        raise ConfigurationError(
+            "decisions.timeout_seconds must be between 0.1 and 10"
+        )
+    decision_player_interval = _number(
+        decisions_raw.get("player_interval_seconds"),
+        "decisions.player_interval_seconds",
+    )
+    if not 0.5 <= decision_player_interval <= 60:
+        raise ConfigurationError(
+            "decisions.player_interval_seconds must be between 0.5 and 60"
+        )
+    decision_ttl = _number(
+        decisions_raw.get("decision_ttl_seconds"),
+        "decisions.decision_ttl_seconds",
+    )
+    if not 0.1 <= decision_ttl <= 5:
+        raise ConfigurationError(
+            "decisions.decision_ttl_seconds must be between 0.1 and 5"
+        )
+    decision_audit_value = decisions_raw.get("audit_log")
+    decision_audit_log = (
+        state_directory / "decisions-shadow.jsonl"
+        if decision_audit_value is None
+        else _required_path(
+            decision_audit_value, "decisions.audit_log", base, home
         )
     )
 
@@ -857,6 +1024,18 @@ def _build_settings(
             audit_log=audit_log,
             controller_manifest=controller_manifest,
         ),
+        decisions=DecisionSettings(
+            enabled=decision_enabled,
+            kind=decision_kind,
+            base_url=decision_base_url,
+            endpoint_path=decision_endpoint_path,
+            credential_env=decision_credential_env,
+            model=decision_model,
+            timeout_seconds=decision_timeout,
+            player_interval_seconds=decision_player_interval,
+            decision_ttl_seconds=decision_ttl,
+            audit_log=decision_audit_log,
+        ),
         providers=MappingProxyType(providers),
         profiles=MappingProxyType(profiles),
     )
@@ -872,6 +1051,7 @@ def _validate_schema_shape(
         ("server", _SERVER_KEYS),
         ("knowledge", _KNOWLEDGE_KEYS),
         ("storage", _STORAGE_KEYS),
+        ("decisions", _DECISION_KEYS),
     ):
         if key in value:
             _unknown_keys(_table(value[key], key), allowed, key)
@@ -1014,18 +1194,21 @@ def _home_directory(environment: Mapping[str, str]) -> Path:
 
 
 def _validate_loopback(host: str) -> None:
-    if host.casefold() == "localhost":
+    if _is_loopback_host(host):
         return
+    raise ConfigurationError(
+        "server.host must be localhost or a loopback IP address"
+    )
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host.casefold() == "localhost":
+        return True
     try:
         address = ipaddress.ip_address(host)
-    except ValueError as error:
-        raise ConfigurationError(
-            "server.host must be localhost or a loopback IP address"
-        ) from error
-    if not address.is_loopback:
-        raise ConfigurationError(
-            "server.host must be localhost or a loopback IP address"
-        )
+    except ValueError:
+        return False
+    return address.is_loopback
 
 
 def _validate_url(value: str, label: str) -> None:
@@ -1036,6 +1219,31 @@ def _validate_url(value: str, label: str) -> None:
         raise ConfigurationError(f"{label} must not contain credentials")
     if parsed.query or parsed.fragment:
         raise ConfigurationError(f"{label} must not contain a query or fragment")
+
+
+def _decision_endpoint_path(value: Any, label: str) -> str:
+    path = _nonblank(value, label)
+    if len(path) > _MAX_DECISION_ENDPOINT_PATH_CHARS:
+        raise ConfigurationError(
+            f"{label} must be at most {_MAX_DECISION_ENDPOINT_PATH_CHARS} characters"
+        )
+    parsed = urlsplit(path)
+    if (
+        not path.startswith("/")
+        or path.startswith("//")
+        or parsed.scheme
+        or parsed.netloc
+    ):
+        raise ConfigurationError(f"{label} must be an absolute URL path")
+    if parsed.query or parsed.fragment or parsed.path != path:
+        raise ConfigurationError(f"{label} must not contain a query or fragment")
+    if "\\" in path:
+        raise ConfigurationError(f"{label} must not contain a backslash")
+    if any(ord(character) < 0x21 or ord(character) == 0x7F for character in path):
+        raise ConfigurationError(f"{label} must not contain whitespace or controls")
+    if any(segment in {".", ".."} for segment in path.split("/")):
+        raise ConfigurationError(f"{label} must not contain dot segments")
+    return path
 
 
 def _enum_value(enum: type[StrEnum], value: Any, label: str) -> Any:
@@ -1066,7 +1274,7 @@ def _toml_document(value: Mapping[str, Any]) -> str:
         f"schema_version = {value['schema_version']}",
         f"selected_profile = {_toml_string(value['selected_profile'])}",
     ]
-    for table_name in ("server", "knowledge", "storage"):
+    for table_name in ("server", "knowledge", "storage", "decisions"):
         lines.extend(("", f"[{table_name}]"))
         _append_toml_values(lines, value[table_name])
     for table_name in ("providers", "profiles"):

@@ -7,6 +7,7 @@
 - [Protocol](Protocol.md): loopback state, question, action, and operation contracts.
 - [Frontend state](Frontend-State-Protocol.md): optional presentation adapter.
 - [Context system](Context-System.md): provenance, retrieval, and dialogue.
+- [Jev shadow decisions](Jev-Decisions.md): compact bounded classifications, explicit outcomes, and offline comparisons; no execution authority.
 - [Evidence gathering](Evidence-Gathering-Arc.md): bounded model-directed observations.
 - [Research workspace plan](Research-Workspace-Plan.md): approved search/read redesign and acceptance gates.
 - [Discovery ranking plan](Discovery-Ranking-Plan.md): bounded recall, explainable ranking, and relevance regressions.

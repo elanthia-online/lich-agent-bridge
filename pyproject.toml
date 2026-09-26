@@ -29,6 +29,7 @@ lab-gswiki = "lich_agent_bridge.gswiki:main"
 labctl = "lich_agent_bridge.labctl:main"
 lab-character-baseline = "lich_agent_bridge.character_baseline:main"
 lab-lich-corpus = "lich_agent_bridge.lich_corpus:main"
+lab-decisions = "lich_agent_bridge.decisions:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
