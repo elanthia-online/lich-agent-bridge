@@ -13,6 +13,7 @@ describe the software, not a player's characters or installed configuration.
 | Change command execution or run a live test | [Safety](project/Safety.md), then [Developer testing](project/Developer-Testing.md) |
 | Read recorded combat trial evidence | [Combat reporting](project/Combat-Reporting-Plan.md) |
 | Change context, retrieval, or evidence tools | [Context system](project/Context-System.md), then [Evidence gathering](project/Evidence-Gathering-Arc.md) |
+| Evaluate bounded Jev decisions without actions | [Jev shadow decisions](project/Jev-Decisions.md) |
 | Change a Lich API, XML, or frontend integration | [Lich authoring references](lich/Lich-Authoring-References.md) |
 | Work on an external script | [Script reference index](lich/scripts/README.md) |
 | Inspect transport contracts | [Protocol](project/Protocol.md) and [Frontend state](project/Frontend-State-Protocol.md) |

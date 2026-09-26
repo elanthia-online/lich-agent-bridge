@@ -8,6 +8,7 @@ from unittest import mock
 
 from lich_agent_bridge.errors import ConfigurationError
 from lich_agent_bridge.settings import (
+    DecisionProviderKind,
     GeneralWebProvider,
     OnlineFallbackPolicy,
     ProviderKind,
@@ -106,6 +107,19 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(
             settings.storage.timing_log,
             state / "lich-agent-bridge" / "timings.jsonl",
+        )
+        self.assertFalse(settings.decisions.enabled)
+        self.assertIs(settings.decisions.kind, DecisionProviderKind.SYSTEM_ONE)
+        self.assertEqual(settings.decisions.base_url, "https://api.typesafe.ai")
+        self.assertEqual(settings.decisions.endpoint_path, "/v1/systemone")
+        self.assertEqual(settings.decisions.credential_env, "JEV_API_KEY")
+        self.assertEqual(settings.decisions.model, "jev-1.13.0")
+        self.assertEqual(settings.decisions.timeout_seconds, 2.0)
+        self.assertEqual(settings.decisions.player_interval_seconds, 1.0)
+        self.assertEqual(settings.decisions.decision_ttl_seconds, 1.0)
+        self.assertEqual(
+            settings.decisions.audit_log,
+            state / "lich-agent-bridge" / "decisions-shadow.jsonl",
         )
         with self.assertRaises(TypeError):
             settings.profiles["other"] = settings.selected_profile  # type: ignore[index]
@@ -212,6 +226,15 @@ model = "from-file"
             "LAB_ACTION_TOKEN_FILE": str(self.root / "token-env"),
             "LAB_AUDIT_LOG": str(self.root / "audit-env"),
             "LAB_CONTROLLER_MANIFEST": str(self.root / "controllers-env.json"),
+            "LAB_DECISIONS_ENABLED": "yes",
+            "LAB_JEV_BASE_URL": "https://jev.example.test/api/",
+            "LAB_DECISION_ENDPOINT_PATH": "/api/alpha/decisions",
+            "LAB_JEV_MODEL": "jev-env",
+            "LAB_JEV_CREDENTIAL_ENV": "PRIVATE_JEV_KEY",
+            "LAB_JEV_TIMEOUT": "3.5",
+            "LAB_DECISION_PLAYER_INTERVAL": "1.5",
+            "LAB_DECISION_TTL": "2.5",
+            "LAB_DECISION_AUDIT_LOG": str(self.root / "decisions-env.jsonl"),
         }
 
         settings = Settings.load(self.config, environment=environment)
@@ -235,6 +258,19 @@ model = "from-file"
             settings.storage.controller_manifest,
             self.root / "controllers-env.json",
         )
+        self.assertTrue(settings.decisions.enabled)
+        self.assertEqual(settings.decisions.base_url, "https://jev.example.test/api")
+        self.assertEqual(
+            settings.decisions.endpoint_path, "/api/alpha/decisions"
+        )
+        self.assertEqual(settings.decisions.model, "jev-env")
+        self.assertEqual(settings.decisions.credential_env, "PRIVATE_JEV_KEY")
+        self.assertEqual(settings.decisions.timeout_seconds, 3.5)
+        self.assertEqual(settings.decisions.player_interval_seconds, 1.5)
+        self.assertEqual(settings.decisions.decision_ttl_seconds, 2.5)
+        self.assertEqual(
+            settings.decisions.audit_log, self.root / "decisions-env.jsonl"
+        )
 
     def test_explicit_overrides_win_over_environment_and_file(self) -> None:
         self.write_config(
@@ -257,6 +293,63 @@ port = 19000
 
         self.assertEqual(settings.server.port, 19_002)
         self.assertEqual(settings.selected_profile.reasoning_effort, "xhigh")
+
+    def test_local_system_one_http_and_no_credential_round_trip(self) -> None:
+        settings = Settings.load(
+            self.config,
+            environment=self.environment,
+            overrides={
+                "decisions": {
+                    "enabled": True,
+                    "base_url": "http://[::1]:8000/",
+                    "endpoint_path": "  /api/alpha/decisions  ",
+                    "credential_env": None,
+                }
+            },
+        )
+
+        self.assertEqual(settings.decisions.base_url, "http://[::1]:8000")
+        self.assertEqual(settings.decisions.endpoint_path, "/api/alpha/decisions")
+        self.assertIsNone(settings.decisions.credential_env)
+        settings.write()
+        written = self.config.read_text(encoding="utf-8")
+        self.assertIn('credential_env = ""', written)
+
+        restored = Settings.load(self.config, environment=self.environment)
+        self.assertTrue(restored.decisions.enabled)
+        self.assertEqual(restored.decisions.endpoint_path, "/api/alpha/decisions")
+        self.assertIsNone(restored.decisions.credential_env)
+
+    def test_local_system_one_http_accepts_named_and_ipv4_loopback(self) -> None:
+        for host in ("localhost", "127.0.0.1"):
+            with self.subTest(host=host):
+                settings = Settings.load(
+                    self.config,
+                    environment=self.environment,
+                    overrides={
+                        "decisions": {
+                            "base_url": f"http://{host}:8000",
+                            "credential_env": None,
+                        }
+                    },
+                )
+                self.assertEqual(
+                    settings.decisions.base_url, f"http://{host}:8000"
+                )
+
+    def test_environment_can_select_credential_free_local_system_one(self) -> None:
+        settings = Settings.load(
+            self.config,
+            environment={
+                **self.environment,
+                "LAB_DECISIONS_ENABLED": "true",
+                "LAB_JEV_BASE_URL": "http://127.0.0.1:8000",
+                "LAB_JEV_CREDENTIAL_ENV": "",
+            },
+        )
+
+        self.assertTrue(settings.decisions.enabled)
+        self.assertIsNone(settings.decisions.credential_env)
 
     def test_legacy_openai_backend_retains_its_default_model(self) -> None:
         settings = Settings.load(
@@ -382,6 +475,12 @@ inventory_database = "configured.sqlite3"
         cases = {
             "top": ("mystery = true\n", "unknown setting"),
             "server": ("[server]\nmystery = true\n", "unknown setting"),
+            "decision mode": (
+                "[decisions]\nmode = \"shadow\"\n", "unknown setting"
+            ),
+            "decision tick interval": (
+                "[decisions]\ntick_interval_seconds = 2\n", "unknown setting"
+            ),
             "provider": ((
                 "[providers.local]\n"
                 'kind = "openai_compatible"\n'
@@ -421,12 +520,88 @@ inventory_database = "configured.sqlite3"
                 'base_url = "http://user:pass@localhost:8080/v1"\n',
                 "must not contain credentials",
             ),
+            "decision enabled": (
+                '[decisions]\nenabled = "true"\n',
+                "decisions.enabled must be true or false",
+            ),
+            "decision provider kind": (
+                '[decisions]\nkind = "jev"\n',
+                "decisions.kind must be one of: system_one",
+            ),
+            "decision HTTPS": (
+                '[decisions]\nbase_url = "http://api.typesafe.ai"\n',
+                "decisions.base_url must use HTTPS unless its HTTP host is loopback",
+            ),
+            "decision URL scheme": (
+                '[decisions]\nbase_url = "ftp://localhost/systemone"\n',
+                "decisions.base_url must be an absolute HTTP",
+            ),
+            "decision URL credentials": (
+                '[decisions]\nbase_url = "https://user:pass@api.typesafe.ai"\n',
+                "decisions.base_url must not contain credentials",
+            ),
+            "relative decision endpoint": (
+                '[decisions]\nendpoint_path = "api/alpha/decisions"\n',
+                "decisions.endpoint_path must be an absolute URL path",
+            ),
+            "decision endpoint scheme": (
+                '[decisions]\nendpoint_path = "https://example.test/decisions"\n',
+                "decisions.endpoint_path must be an absolute URL path",
+            ),
+            "decision endpoint authority": (
+                '[decisions]\nendpoint_path = "//example.test/decisions"\n',
+                "decisions.endpoint_path must be an absolute URL path",
+            ),
+            "decision endpoint query": (
+                '[decisions]\nendpoint_path = "/v1/systemone?debug=true"\n',
+                "decisions.endpoint_path must not contain a query or fragment",
+            ),
+            "decision endpoint fragment": (
+                '[decisions]\nendpoint_path = "/v1/systemone#fragment"\n',
+                "decisions.endpoint_path must not contain a query or fragment",
+            ),
+            "decision endpoint backslash": (
+                "[decisions]\nendpoint_path = '/v1\\\\systemone'\n",
+                "decisions.endpoint_path must not contain a backslash",
+            ),
+            "decision endpoint dot segment": (
+                '[decisions]\nendpoint_path = "/v1/../systemone"\n',
+                "decisions.endpoint_path must not contain dot segments",
+            ),
+            "decision endpoint whitespace": (
+                '[decisions]\nendpoint_path = "/api/alpha decisions"\n',
+                "decisions.endpoint_path must not contain whitespace or controls",
+            ),
+            "decision endpoint length": (
+                '[decisions]\nendpoint_path = "/' + ("x" * 512) + '"\n',
+                "decisions.endpoint_path must be at most 512 characters",
+            ),
+            "decision credential reference": (
+                '[decisions]\ncredential_env = "not an env name"\n',
+                "decisions.credential_env must be an environment variable name",
+            ),
+            "player interval": (
+                "[decisions]\nplayer_interval_seconds = 0.1\n",
+                "decisions.player_interval_seconds must be between",
+            ),
         }
         for label, (addition, message) in cases.items():
             with self.subTest(label=label):
                 self.write_config(f"schema_version = 1\n{addition}")
                 with self.assertRaisesRegex(ConfigurationError, message):
                     Settings.load(self.config, environment=self.environment)
+
+    def test_invalid_decision_enabled_environment_override_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            ConfigurationError, "LAB_DECISIONS_ENABLED has an invalid value"
+        ):
+            Settings.load(
+                self.config,
+                environment={
+                    **self.environment,
+                    "LAB_DECISIONS_ENABLED": "sometimes",
+                },
+            )
 
     def test_default_path_honors_explicit_lab_config_xdg_and_home(self) -> None:
         explicit = self.root / "explicit.toml"
@@ -457,13 +632,18 @@ inventory_database = "configured.sqlite3"
         secret = "secret-value-that-must-not-leak"
         settings = Settings.load(
             self.config,
-            environment={**self.environment, "OPENAI_API_KEY": secret},
+            environment={
+                **self.environment,
+                "OPENAI_API_KEY": secret,
+                "JEV_API_KEY": secret,
+            },
         )
 
         rendered = repr(settings.redacted())
 
         self.assertNotIn(secret, rendered)
         self.assertIn("OPENAI_API_KEY", rendered)
+        self.assertIn("JEV_API_KEY", rendered)
         self.assertNotIn("api_key", settings.providers["openai"].__slots__)
 
     def test_atomic_write_round_trips_and_refuses_unconfirmed_replacement(self) -> None:

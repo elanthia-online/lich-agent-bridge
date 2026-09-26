@@ -1,5 +1,10 @@
 # Context system
 
+For the optional symbolic System One evaluator (separate from this research
+pipeline), see [Jev shadow decisions](Jev-Decisions.md). It provides bounded
+decision-specific observations and measured outcome history without an execution
+interface.
+
 The context assembler provides one bounded interface for building a question
 packet. Callers should not coordinate retrieval, privacy filters, token budgets,
 or provenance themselves.
