@@ -28,6 +28,39 @@ MAX_SEQUENCE_LENGTH = 1200
 MAX_DETAIL_LENGTH = 500
 MAX_TTL_SECONDS = 120
 DEFAULT_TTL_SECONDS = 45
+DIRECT_LICH_EVAL_COMMANDS = frozenset({"e", "eq", "exec", "execq", "en", "execname"})
+
+
+def normalize_full_access_command(command: str) -> str:
+    """Validate one locally authorized game-input or Lich client command.
+
+    Lich script commands retain their leading semicolon so the native bridge can
+    dispatch them through ``do_client``. Inline Ruby execution remains outside
+    this capability even though locally installed scripts are trusted code.
+    """
+
+    if not isinstance(command, str):
+        raise ValidationError("command must be a string")
+    normalized = command.strip()
+    if not normalized or len(normalized) > 140:
+        raise ValidationError("command must contain 1 to 140 characters")
+    if any(character in normalized for character in ("\x00", "\r", "\n", "|", "&")):
+        raise ValidationError("command chaining or control characters are forbidden")
+    if normalized.startswith(","):
+        raise ValidationError("frontend client commands are forbidden")
+    if normalized.startswith(";"):
+        if ";" in normalized[1:]:
+            raise ValidationError("command chaining or control characters are forbidden")
+        lich_command = normalized[1:].strip()
+        if not lich_command:
+            raise ValidationError("Lich command must not be blank")
+        verb = lich_command.split(None, 1)[0].casefold()
+        if verb in DIRECT_LICH_EVAL_COMMANDS:
+            raise ValidationError("inline Ruby Lich commands are forbidden")
+        return normalized
+    if ";" in normalized:
+        raise ValidationError("command chaining or control characters are forbidden")
+    return normalized
 
 
 def _strict_keys(
@@ -429,16 +462,16 @@ class CommandPolicy:
                 and matched.controller.safe_handoff["kind"] in {"quick_refuge", "controller_refuge"})
 
     def evaluate(self, command: str) -> tuple[str, PolicyDecision]:
-        if any(character in command for character in ("\r", "\n", ";", "|", "&")):
+        if any(character in command for character in ("\x00", "\r", "\n", "|", "&")):
             raise ValidationError("command chaining or control characters are forbidden")
         collapsed = " ".join(command.split())
         folded = collapsed.casefold()
         direct = self._DIRECT_COMMAND.fullmatch(collapsed)
         if direct is not None:
-            inner = direct.group(1).strip()
-            if not inner or inner.startswith((",", ";")):
-                raise ValidationError("direct game command cannot invoke a client command")
+            inner = normalize_full_access_command(direct.group(1))
             return f"lab direct {inner}", PolicyDecision("direct", False)
+        if ";" in command:
+            raise ValidationError("command chaining or control characters are forbidden")
         if folded.startswith(",") or any(
             pattern.search(folded) for pattern in self._FORBIDDEN
         ):

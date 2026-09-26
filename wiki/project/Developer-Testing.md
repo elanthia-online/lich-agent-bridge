@@ -100,9 +100,117 @@ query. Explicitly select `look` for an inspection-only diagnostic method; other
 methods can involve spells. Every step still passes ActionBroker and the
 independent Lich checks.
 
-The isolated `lab.execute_code` tool can combine small state/query operations,
-but permits only one mutation (perform or exact-operation stop) per execution and has a short execution limit.
-Use direct perform/watch for long operations; it is not a general script runner.
+The isolated `lab.execute_code` tool combines small reads and authorized actions:
+up to eight mutation attempts (perform or exact-operation stop) within twenty
+total SDK calls. Use `await` for dependent steps and `Promise.all` for independent
+characters. Each call still passes the same broker/native gates; the executor
+does not enable full access or queue competing operations for one character.
+Default execution time is ten seconds; an explicit `timeout_ms` may request up to
+thirty seconds. Individual isolate watches remain capped at one second. Use direct
+perform/watch for long operations; the isolate is not a combat supervisor.
+
+### Short multi-character batches
+
+For an independently authorized setup at a safe refuge, this synthetic example
+sends one leader command, waits for its delivery receipt, then joins two followers
+concurrently. Replace names, refuge and commands with the player's approved scope.
+It does not start a hunt or claim that delivery proves party membership.
+
+```typescript
+const characters = ['Testlead', 'Testone', 'Testtwo'];
+const states = await Promise.all(characters.map(character => lab.snapshot({ character })));
+if (states.some(s => s.freshness.stale || s.room?.id !== '123' || s.dead !== false)) {
+  throw new Error('Approved safe-start state is unavailable');
+}
+
+// Three snapshots and three performs leave fourteen calls for status watches.
+// A watch can return on any progress event; one watch is not one second.
+let watchesLeft = 14;
+async function observeDelivery(operation: OperationResult): Promise<OperationResult> {
+  let cursor = String(Math.max(0, ...operation.progress.map(p => p.cursor)));
+  while (watchesLeft > 0) {
+    if (operation.status === 'succeeded') return operation;
+    if (['failed', 'timed_out', 'interrupted'].includes(operation.status)) {
+      throw new Error(`Operation ${operation.operation_id}: ${operation.status}`);
+    }
+    watchesLeft--;
+    const page = await lab.operationWatch({
+      operation_id: operation.operation_id, cursor, timeout_ms: 1000,
+    });
+    cursor = page.cursor;
+    operation = page.operation;
+  }
+  return operation; // Pending is not failed: continue watching this exact ID.
+}
+
+const leader = await observeDelivery(await lab.perform({
+  character: characters[0], capability: 'session.command',
+  args: { command: 'group open' }, expected_generation: states[0].generation,
+}));
+if (leader.status !== 'succeeded') {
+  return { complete: false, phase: 'leader_pending', operations: [leader] };
+}
+const followers = await Promise.all(states.slice(1).map(async state =>
+  observeDelivery(await lab.perform({
+    character: state.character, capability: 'session.command',
+    args: { command: `join ${characters[0]}` }, expected_generation: state.generation,
+  }))
+));
+const operations = [leader, ...followers].map(o => ({ id: o.operation_id, status: o.status }));
+return { complete: operations.every(o => o.status === 'succeeded'), operations };
+```
+
+Verify actual membership through authoritative game/native observations after
+the batch. A sleep is not confirmation. Current snapshots must not be assumed
+to contain fields absent from the generated SDK contract.
+If `complete` is false, continue with direct operation watches on the retained
+IDs; do not repeat the batch. The executor's `success` flag reports execution,
+not that every admitted operation has finished or the game effect was verified.
+
+The execution response retains per-step operation receipts when user code fails.
+Inspect those receipts before deciding what remains to be done. After a failed
+or ambiguous mutation, further performs in that invocation are refused; reads,
+watches and exact stops remain available within the limits. Reaching an execution
+deadline closes new dispatch; it does not prove already-admitted operations stopped.
+An in-flight admission without a receipt remains explicitly unconfirmed. Neither
+an exception nor `Promise.all` rejection rolls back a sibling already dispatched.
+Do not retry an ambiguous batch or infer exactly-once delivery.
+
+Perform receipts require a valid operation ID and status. Exact-stop receipts
+must identify the requested character and operation and report a boolean
+`stopped`; `false` is valid for an already-terminal operation. Malformed mutation
+replies remain unconfirmed and block subsequent performs. A stop receipt alone
+does not prove native cleanup has completed. Execution deadlines and elapsed
+metrics use a monotonic clock, independently of wall-clock corrections.
+
+### Concurrent observation watches
+
+`lab.watch` observes character changes; `lab.operationWatch` observes an exact
+operation ticket. Both work inside the same executor. Three snapshot/watch/
+snapshot chains can run concurrently in nine SDK calls without game commands:
+
+```typescript
+return await Promise.all(['Testlead', 'Testone', 'Testtwo'].map(async character => {
+  const before = await lab.snapshot({ character });
+  if (before.freshness.stale) return { character, available: false, reason: 'stale' };
+  const page = await lab.watch({ character, cursor: before.cursor, timeout_ms: 1000 });
+  const after = await lab.snapshot({ character });
+  return {
+    character, generation: after.generation,
+    same_generation: before.generation === after.generation,
+    freshness: after.freshness, room: after.room, health: after.vitals?.health,
+    changes: page.items.map(e => ({ generation: e.generation, kind: e.kind, summary: e.summary })),
+    next_cursor: page.cursor, timed_out: page.timed_out, truncated: page.truncated,
+  };
+}));
+```
+
+Retain one cursor per character and generation across observation windows.
+Treat a generation change or stale final snapshot as unavailable for decisions,
+not as continuity. A timeout means no new event in this window, not a failed
+character or proof that an earlier action worked. Report truncation rather than
+claiming a complete history. Long watches belong in the direct tools; continuous
+combat/survival monitoring remains in the local native controller.
 
 ## Direct native go2 travel
 

@@ -135,18 +135,38 @@ or declare an arbitrary destination safe. See [direct travel](Developer-Testing.
 Guarded mode remains the default interface for routine use. During supervised
 exploratory testing, the player may enter `;lab full access on` in one owning
 Lich session. This exposes `session.command` for that character without requiring
-a predeclared profile or per-verb capability. The grant is local, per-session,
-and cannot be enabled by the sidecar or an agent request.
+a predeclared profile or per-verb capability. The preference is local and saved
+through native Lich Settings under the `lab` namespace and exact game/character
+scope. It is restored before the bridge publishes startup state. Only literal
+boolean true enables it; missing, invalid or unreadable settings stay guarded.
+The sidecar cannot enable it through an operation request. Restoring a saved
+preference does not restore old requests, operation IDs or generation authority.
 
 The command still passes through the ordinary generation-bound, expiring,
 one-at-a-time broker and the native bridge rechecks the local grant immediately
-before sending it. Only one game-input line is accepted; client/Lich commands,
-newlines and chaining characters are rejected. A successful operation proves
-native delivery, not that the game accepted or performed the command. Agents
-must use subsequent state or event evidence for consequential claims.
+before sending it. One game-input line or one semicolon-prefixed Lich command is
+accepted. Lich commands go through Lich's native client dispatcher. Frontend
+commands, inline Ruby execution (`;e`, `;exec`, and aliases), newlines and command
+chaining remain rejected. Installed Lich scripts are trusted local Ruby code, not
+sandboxed plugins. A successful operation proves native delivery, not that the
+game or script performed the requested effect. Agents must use subsequent state
+or event evidence for consequential claims.
 
-Use `;lab full access off` when exploratory work ends. Stopping LAB or the Lich
-session also removes the grant. Stable repeated behavior belongs in a typed
+`lab.execute_code` may compose multiple individually authorized operations. Its
+eight-mutation/twenty-call budget does not replace per-character broker ownership,
+freshness, generation, command or grant checks. A script may sequence operations
+with `await` or run independent characters concurrently; same-character busy
+responses are not permission to queue or retry. Each forwarded action retains
+its own operation receipt. Batch failure prevents subsequent performs but cannot
+roll back already-sent work. Executor expiry closes dispatch, not native operation
+authority; sent-but-unconfirmed admission must remain visible for reconciliation.
+The executor is not the local emergency-return mechanism.
+
+Use `;lab full access off` when exploratory work ends; this also saves the off
+preference. Stopping LAB or the Lich session removes current execution authority,
+but the saved preference applies on the next start. A failed preference write
+leaves access off locally and warns that the prior saved value may remain;
+verify persistence before restarting. Stable repeated behavior belongs in a typed
 capability or registered controller, where its semantic outcome can be verified.
 
 An authorized movement or combat operation is complete only when fresh evidence
