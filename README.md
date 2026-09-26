@@ -103,10 +103,8 @@ support, `labctl combat-report CHARACTER --operation-id ID` reads the retained
 report after verified refuge return. Agents use `combat.report` in questions or
 `lab.combat_report` through MCP. Omitting the ID selects the latest controller
 operation, not a general hunt-history search. Missing support/data is reported
-as unavailable. This first slice reads the conventional per-character
-`combat_stats.db` location under Lich's data directory; custom Recorder paths
-are not discovered. See the [combat-reporting contract](wiki/project/Combat-Reporting-Plan.md)
-for prerequisites, limits, and the bounded live acceptance already completed.
+as unavailable. See the [combat-reporting contract](wiki/project/Combat-Reporting-Plan.md)
+for prerequisites, limits, and pending live acceptance.
 
 The bundled controller manifest is empty. Personal combat routines, hunting
 profiles, character builds, and equipment configuration are not distributed or
@@ -187,17 +185,25 @@ The default catalog contains seven capabilities:
 - `session.recover_controller`: acknowledge one exact retained controller handoff
   after explicit operator confirmation and verified native recovery state.
 - `session.command`: in a locally enabled full-access session, deliver one
-  generation-bound, audited game command without requiring a profile. The
+  generation-bound, audited game-input or Lich script command without requiring
+  a profile. The
   receipt proves delivery only; callers must inspect fresh state or game evidence
   before claiming that the requested effect occurred.
 
-Full access is an exploratory-testing mode, not the default policy. The player
-must enable it inside each owning Lich session with `;lab full access on`; it
-cannot be enabled remotely. `;lab full access off`, `;lab actions off`, stopping
-LAB, or ending the Lich session removes that authority. Full access accepts one
-game-input line at a time and still rejects client/Lich commands, multiline input,
-and command chaining. Repeatable workflows should graduate to typed capabilities
-or registered controllers once their contract is understood.
+Full access is an exploratory-testing mode, guarded by default for a new character.
+The player enables it with `;lab full access on`; that preference is saved in
+native Lich settings for this game/character and restored on bridge restart or
+relog. `;lab full access off` saves the opposite preference. Missing or malformed
+settings remain guarded. `;lab actions off`, stopping LAB, or ending the Lich
+session removes current execution authority without erasing the saved preference.
+Full access accepts one
+game-input line or one semicolon-prefixed Lich command at a time. Lich commands
+use Lich's native client dispatcher, so script arguments and lifecycle commands
+retain their normal semantics. Frontend commands, inline Ruby execution (`;e`,
+`;exec`, and aliases), multiline input, and command chaining are still rejected.
+Locally installed Lich scripts are trusted Ruby code, not a LAB sandbox.
+Repeatable workflows should graduate to typed capabilities or registered
+controllers once their contract is understood.
 
 The controller manifest is empty. Retrieve the live catalog and its schemas
 instead of hard-coding availability:
@@ -456,6 +462,7 @@ The core Ruby bridge tests require a Ruby runtime compatible with the installed 
 ruby tests/lab_dispatcher_test.rb
 ruby tests/lab_bridge_test.rb
 ruby tests/lab_go2_travel_test.rb
+ruby tests/lab_full_access_test.rb
 ruby tests/lab_controller_registry_test.rb
 ruby tests/lab_controller_controls_test.rb
 ruby tests/lab_controller_control_binding_test.rb

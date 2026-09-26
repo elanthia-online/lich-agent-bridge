@@ -34,4 +34,10 @@ test('Streamable HTTP MCP endpoint advertises the exact ten-tool surface', async
     'lab.watch',
     'lab.wiki_search',
   ]);
+  const executor = listed.tools.find(tool => tool.name === 'lab.execute_code')!;
+  assert.match(executor.description ?? '', /8 mutation attempts/);
+  const timeout = executor.inputSchema.properties?.timeout_ms as Record<string, unknown>;
+  assert.equal(timeout.maximum, 30_000);
+  assert.match(executor.description ?? '', /default 10s/);
+  assert.equal(executor.inputSchema.required?.includes('timeout_ms') ?? false, false);
 });

@@ -360,18 +360,27 @@ It acknowledges restored safety, not successful execution of the failed test.
 
 ## Exploratory game commands
 
-An unfamiliar game verb does not require a temporary controller profile. After
-the player enters `;lab full access on` in the owning character's Lich session,
-the generic `session.command` capability may deliver one game-input line. This
-is intended for supervised exploration such as regrouping characters or probing
+An unfamiliar game verb or Lich script command does not require a temporary
+controller profile. After the player enters `;lab full access on` in the owning
+character's Lich session,
+the generic `session.command` capability may deliver one game-input line or one
+semicolon-prefixed Lich command. This is intended for supervised exploration
+such as regrouping characters or probing
 a room state before the behavior is stable enough to deserve a typed capability.
 
 The grant cannot be enabled remotely. The command remains generation-bound,
 expiring, serialized and audited, and the native bridge checks the local grant
-again immediately before delivery. Client/Lich commands, multiline input and
-command chaining are rejected. Completion proves delivery only; callers must
-read subsequent state or events before claiming the game performed the action.
-Use `;lab full access off` when exploration ends.
+again immediately before delivery. Lich commands use Lich's native client
+dispatcher. Frontend commands, inline Ruby execution (`;e`, `;exec`, and aliases),
+multiline input and command chaining are rejected. Installed scripts remain
+trusted local Ruby code. Completion proves delivery only; callers must read
+subsequent state or events before claiming the game or script performed the
+action.
+The on/off choice is saved per game/character in native Lich Settings and
+restored when LAB starts, including after relogging. New characters remain
+guarded until explicitly enabled. Use `;lab full access off` when exploration
+ends; it persists the off choice. Stopping LAB ends current execution but does
+not erase this preference.
 
 ## Verification boundary
 

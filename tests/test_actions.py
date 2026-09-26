@@ -97,20 +97,37 @@ class ActionBrokerTests(unittest.TestCase):
 
     def test_full_access_wrapper_dispatches_one_audited_game_command(self):
         proposed = self.broker.submit(
-            ActionProposal(character="Testscout", command="lab direct join Calvix")
+            ActionProposal(character="Testscout", command="lab direct join Testleader")
         )
 
         self.assertEqual(proposed["status"], "queued")
         self.assertEqual(proposed["kind"], "direct")
         action = self.broker.poll(ActionContext("Testscout", "1000"))
-        self.assertEqual(action["command"], "lab direct join Calvix")
+        self.assertEqual(action["command"], "lab direct join Testleader")
+
+    def test_full_access_wrapper_dispatches_one_lich_script_command(self):
+        proposed = self.broker.submit(
+            ActionProposal(
+                character="Testscout",
+                command="lab direct ;eohunter Leveling-Trio dry",
+            )
+        )
+
+        self.assertEqual(proposed["status"], "queued")
+        self.assertEqual(proposed["kind"], "direct")
+        action = self.broker.poll(ActionContext("Testscout", "1000"))
+        self.assertEqual(
+            action["command"], "lab direct ;eohunter Leveling-Trio dry"
+        )
 
     def test_full_access_wrapper_rejects_client_commands_and_chaining(self):
         for command in (
             "lab direct ;e puts 'no'",
+            "lab direct ;exec puts 'no'",
             "lab direct , ask something",
-            "lab direct join Calvix;drop all",
-            "lab direct join Calvix\nquit",
+            "lab direct ;eohunter Leveling-Trio dry;quit",
+            "lab direct join Testleader;drop all",
+            "lab direct join Testleader\nquit",
         ):
             with self.subTest(command=command):
                 with self.assertRaises(ValidationError):

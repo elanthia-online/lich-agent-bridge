@@ -12,6 +12,8 @@ class FakeHub implements SessionHubCaller {
   async call(route: SessionHubRoute, payload: Record<string, unknown>, metadata?: BridgeMetadata): Promise<unknown> {
     this.calls.push({ route, payload, metadata });
     if (route === this.failRoute) throw new SessionHubError('denied by hub', 409, 'denied', { reason: 'policy' });
+    if (route === 'perform') return { operation_id: `ticket-${this.calls.length}`, character: payload.character, status: 'succeeded' };
+    if (route === 'operationStop') return { character: payload.character, operation_id: payload.operation_id, stopped: true, stop_requested: true };
     return { route, payload };
   }
 }
@@ -168,7 +170,7 @@ test('bridge validates calls, preserves hub throws, and records ordered step met
   assert.deepEqual(hub.calls[0].metadata, { operationId: 'op-test', stepId: 1 });
 });
 
-test('bridge permits many reads, caps isolate watch, one perform, and recursion', async () => {
+test('bridge permits reads, caps isolate watch, eight mutations, and recursion', async () => {
   const hub = new FakeHub();
   const state = bridgeState();
   const bridge = createBridge(hub, state);
@@ -178,11 +180,95 @@ test('bridge permits many reads, caps isolate watch, one perform, and recursion'
     bridge.call('watch', { character: 'Testmage', timeout_ms: MAX_ISOLATE_WATCH_MS + 1 }),
     /use direct lab.watch/,
   );
-  await bridge.call('perform', { character: 'Testmage', capability: 'hunt.prepare' });
+  for (let i = 0; i < 8; i++) await bridge.call('perform', { character: 'Testmage', capability: 'hunt.prepare' });
   await assert.rejects(
     bridge.call('perform', { character: 'Testmage', capability: 'room.loot' }),
-    /At most one lab.perform/,
+    /At most 8 mutation attempts/,
   );
   await assert.rejects(bridge.call('executeCode', {}), /Recursive lab.execute_code is forbidden/);
-  assert.equal(hub.calls.filter((call) => call.route === 'perform').length, 1);
+  assert.equal(hub.calls.filter((call) => call.route === 'perform').length, 8);
+});
+
+test('invalid mutation and SessionHub access/generation/busy failures close perform admission, preserving exact cleanup', async () => {
+  for (const failure of ['invalid', 'full_access_required', 'generation_changed', 'operation_busy', 'transport_error']) {
+    const hub = new FakeHub();
+    const original = hub.call.bind(hub);
+    hub.call = async (route, payload, metadata) => {
+      if (route === 'perform') {
+        hub.calls.push({ route, payload, metadata });
+        throw new SessionHubError(failure, failure === 'transport_error' ? 0 : 409, failure, null);
+      }
+      return original(route, payload, metadata);
+    };
+    const state = bridgeState();
+    const bridge = createBridge(hub, state);
+    await assert.rejects(bridge.call('perform', failure === 'invalid' ? { character: 'Testmage' } : {
+      character: 'Testmage', capability: 'session.command', args: { command: 'look' }, expected_generation: 'generation-test',
+    }));
+    await assert.rejects(bridge.call('perform', { character: 'Testwarrior', capability: 'hunt.prepare' }), /Further lab.perform/);
+    await bridge.call('snapshot', { character: 'Testmage' });
+    await bridge.call('stop', { character: 'Testmage', operation_id: 'ticket-owned', expected_generation: 'generation-test' });
+    assert.equal(hub.calls.filter((call) => call.route === 'perform').length, failure === 'invalid' ? 0 : 1);
+    if (failure !== 'invalid') assert.equal(hub.calls[0].payload.expected_generation, 'generation-test');
+  }
+});
+
+test('failed operation watch closes dependent performs while preserving receipts and watch polling', async () => {
+  const hub = new FakeHub();
+  const original = hub.call.bind(hub);
+  hub.call = async (route, payload, metadata) => route === 'operationWatch'
+    ? { operation: { operation_id: payload.operation_id, character: 'Testmage', status: 'failed' } }
+    : original(route, payload, metadata);
+  const state = bridgeState();
+  const bridge = createBridge(hub, state);
+  await bridge.call('perform', { character: 'Testmage', capability: 'hunt.prepare' });
+  const page = await bridge.call('operationWatch', { operation_id: 'ticket-1' });
+  assert.equal((page as any).operation.status, 'failed');
+  await assert.rejects(bridge.call('perform', { character: 'Testmage', capability: 'room.loot' }), /Further lab.perform/);
+  assert.equal(state.steps[0].operation_id, 'ticket-1');
+  assert.equal(state.steps[0].operation_status, 'failed');
+});
+
+test('malformed mutation receipts remain unconfirmed and block subsequent performs', async () => {
+  const cases = [
+    { method: 'perform', reply: {} },
+    { method: 'perform', reply: { operation_id: '', status: 'running' } },
+    { method: 'perform', reply: { operation_id: 'x'.repeat(65), status: 'running' } },
+    { method: 'perform', reply: { operation_id: 'known-ticket' } },
+    { method: 'perform', reply: { operation_id: 'known-ticket', status: 'invented' } },
+    { method: 'stop', reply: {} },
+    { method: 'stop', reply: { character: 'Testmage', operation_id: 'wrong-ticket', stopped: true } },
+    { method: 'stop', reply: { character: 'Othermage', operation_id: 'known-ticket', stopped: true } },
+    { method: 'stop', reply: { character: 'Testmage', operation_id: 'known-ticket', stopped: 'yes' } },
+  ];
+  for (const { method, reply } of cases) {
+    let calls = 0;
+    const state = bridgeState();
+    const bridge = createBridge({ async call() { calls++; return reply; } }, state);
+    await assert.rejects(bridge.call(method, method === 'perform'
+      ? { character: 'Testmage', capability: 'hunt.prepare' }
+      : { character: 'Testmage', operation_id: 'known-ticket', expected_generation: 'generation-test' }), /unconfirmed/);
+    await assert.rejects(bridge.call('perform', { character: 'Testmage', capability: 'hunt.prepare' }), /Further lab.perform/);
+    assert.equal(calls, 1);
+    assert.equal(state.steps[0].success, false);
+    assert.equal(state.steps[0].dispatch_status, 'unconfirmed');
+    if (method === 'stop' || reply.operation_id === 'known-ticket') assert.equal(state.steps[0].operation_id, 'known-ticket');
+  }
+});
+
+test('exact stop accepts both requested stops and already-terminal no-ops', async () => {
+  for (const stopped of [true, false]) {
+    const state = bridgeState();
+    const hub = new FakeHub();
+    const original = hub.call.bind(hub);
+    hub.call = async (route, payload, metadata) => route === 'operationStop'
+      ? { character: 'TESTMAGE', operation_id: payload.operation_id, stopped }
+      : original(route, payload, metadata);
+    const bridge = createBridge(hub, state);
+    await bridge.call('stop', { character: 'Testmage', operation_id: 'known-ticket', expected_generation: 'generation-test' });
+    await bridge.call('perform', { character: 'Testmage', capability: 'hunt.prepare' });
+    assert.equal(state.steps[0].success, true);
+    assert.equal(state.steps[0].dispatch_status, 'acknowledged');
+    assert.equal(state.steps[0].stopped, stopped);
+  }
 });

@@ -26,7 +26,7 @@ def lab_dispatcher_help
     "inspect: ;lab status | state | scripts | inventory | last | alerts | sources | context\n" \
     "capabilities: ;lab do item audit #ID | do hunt prepare | do room loot\n" \
     "control: ;lab operation stop | actions on|off | approve [ID] | " \
-    "approve auto [off]\n" \
+    "approve auto [off] | full access on|off (saved per character)\n" \
     "recovery: ;lab recover | recover RUN_ID confirm (verify a failed Quick handoff)\n" \
     "memory: ;lab forget (clears this character's temporary dialogue only)\n" \
     "explicit question: ;lab ask QUESTION\n" \
