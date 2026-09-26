@@ -1,0 +1,26 @@
+{
+  "description": "Independent synthetic retrieval examples, not GemStone mechanics. Frozen lexical baseline for a later optional semantic comparison.",
+  "pages": [
+    {"title":"Prism Ward (9876)","text":"== Rules ==\nPrism Ward costs seven sparks. It protects a paper sentinel for forty beats."},
+    {"title":"Archive Ledger","padding_paragraphs":180,"text":"== Details ==\nThe copper latch opens only after the violet seal is removed. This does not apply to silver latches."},
+    {"title":"Festival Engine","text":"== Overview ==\nThe festival engine uses two independent safeguards.\n\n== Details ==\nAmber gears require a ceramic washer.\n\n== Notes ==\nIndigo gears require a woven sleeve."},
+    {"title":"Harbor Manual/saved posts","text":"== Notes ==\nThe harbor beacon must face inland during violet fog. This remains a mechanical rule in this synthetic corpus."},
+    {"title":"Shop:Harbor Supplies/2030","text":"== Stock ==\nHarbor beacon violet fog souvenirs are sold for nine tokens.\n\n== Catalogue ==\nAn amber gear costs eleven tokens."},
+    {"title":"Comparison Matrix","text":"== Details ==\nThe following matrix applies only while the apparatus is dry.\n{| class=\"wikitable\"\n! Mode !! Allowance\n|-\n| Copper || Three turns\n|-\n| Silver || Five turns\n|}\nWet apparatus receives no allowance."},
+    {"title":"Old Prism Name","text":"#REDIRECT [[Prism Ward (9876)]]"},
+    {"title":"Winter Travel","text":"== Notes ==\nInsulated footwear prevents frostbite on prolonged expeditions."},
+    {"title":"Sounding Bells","text":"== Details ==\nBronze sounding bells warn of pressure loss.\n\n== Noise ==\nDecorative bells provide no warning."},
+    {"title":"Shop:Festival Supplies/2030","text":"== Stock ==\nFestival engine amber indigo gears sleeve washer souvenirs cost twenty tokens."}
+  ],
+  "questions": [
+    {"id":"exact-number","query":"9876","sources":["Prism Ward (9876)"],"facts":["costs seven sparks","forty beats"]},
+    {"id":"late-generic-heading","query":"copper latch violet seal","sources":["Archive Ledger"],"facts":["opens only after the violet seal is removed","does not apply to silver latches"]},
+    {"id":"multiple-facts","query":"festival engine amber indigo gears","sources":["Festival Engine"],"facts":["Amber gears require a ceramic washer","Indigo gears require a woven sleeve"]},
+    {"id":"archive-rule","query":"harbor beacon violet fog","sources":["Harbor Manual/saved posts"],"facts":["must face inland during violet fog"]},
+    {"id":"shopping","query":"buy amber gear price","sources":["Shop:Harbor Supplies/2030"],"facts":["An amber gear costs eleven tokens"]},
+    {"id":"table-context","query":"comparison matrix copper allowance","sources":["Comparison Matrix"],"facts":["applies only while the apparatus is dry","! Mode !! Allowance","Copper || Three turns","Wet apparatus receives no allowance"]},
+    {"id":"redirect","query":"Old Prism Name","sources":["Prism Ward (9876)"],"facts":["costs seven sparks"]},
+    {"id":"precise-equipment","query":"bronze sounding bells pressure","sources":["Sounding Bells"],"facts":["warn of pressure loss","Decorative bells provide no warning"]},
+    {"id":"paraphrase-challenge","query":"What keeps feet warm during long journeys?","sources":["Winter Travel"],"facts":["Insulated footwear prevents frostbite"],"challenge":"Vocabulary mismatch intentionally retained for a future semantic comparison; not a required lexical pass."}
+  ]
+}

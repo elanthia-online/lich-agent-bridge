@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from copy import deepcopy
 import hashlib
+import math
 import re
 import time
 from typing import Any, Mapping, Sequence
@@ -172,6 +173,40 @@ class WorldStateEvidenceAdapter:
             cursor=int(current["cursor"]),
         )
 
+    def verify_controller_recovery(self, *, character, controller, previous_generation,
+                                   generation, action_id, room_id, hands) -> bool:
+        """Read a player acknowledgement from the authenticated native event feed.
+
+        No receipt means no cross-generation recovery; expired ring entries must
+        be explicitly republished by the player, not inferred from current safety.
+        """
+        receipt = self.controller_recovery_receipt(
+            character=character, generation=generation, action_id=action_id
+        )
+        return bool(
+            receipt
+            and receipt.get("controller") == controller
+            and receipt.get("previous_generation") == previous_generation
+            and receipt.get("operator_confirmed") is True
+            and receipt.get("room_id") == room_id
+            and receipt.get("hands") == {"left": hands[0], "right": hands[1]}
+        )
+
+    def controller_recovery_receipt(self, *, character, generation, action_id):
+        """Return the newest exact native recovery receipt, if still retained."""
+
+        page = self._world_state.watch(character, cursor=0, timeout=0)
+        for event in reversed(page["events"]):
+            data = event.get("data")
+            if (
+                event.get("kind") == "controller_recovery"
+                and event.get("generation") == generation
+                and isinstance(data, Mapping)
+                and data.get("action_id") == action_id
+            ):
+                return dict(data)
+        return None
+
     def verify_controller(
         self,
         registration: object,
@@ -182,7 +217,12 @@ class WorldStateEvidenceAdapter:
             raise ValidationError("controller evidence registration is invalid")
         if not action_id:
             raise ValidationError("controller action ID is unavailable")
-        timeout = max(0.0, min(float(timeout_seconds), MAX_WATCH_TIMEOUT_SECONDS))
+        timeout = float(timeout_seconds)
+        if not math.isfinite(timeout):
+            raise ValidationError("controller evidence timeout must be finite")
+        timeout = max(0.0, timeout)
+        # The caller supplies the operation's remaining lifetime. A watch is
+        # only one bounded transport wait, not a second operation deadline.
         deadline = time.monotonic() + timeout
         cursor = registration.cursor
         while True:
@@ -190,7 +230,7 @@ class WorldStateEvidenceAdapter:
             page = self._world_state.watch(
                 registration.character,
                 cursor=cursor,
-                timeout=max(0.0, remaining),
+                timeout=max(0.0, min(remaining, MAX_WATCH_TIMEOUT_SECONDS)),
             )
             cursor = int(page["cursor"])
             for event in page["events"]:
@@ -230,7 +270,7 @@ class WorldStateEvidenceAdapter:
                     },
                     action_id=action_id,
                 )
-            if remaining <= 0 or page["timed_out"]:
+            if time.monotonic() >= deadline:
                 return None
 
 
@@ -528,6 +568,28 @@ class SessionHub:
             "truncated": page["truncated"],
         }
 
+    def combat_report(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        from .combat_reports import operation_report
+
+        request = _strict(payload, label="combat report request",
+                          allowed={"character", "operation_id"}, required={"character"})
+        character = _character(request["character"])
+        if "operation_id" in request:
+            operation_id = request["operation_id"]
+            if not isinstance(operation_id, str) or not re.fullmatch(r"[0-9a-f]{16}", operation_id):
+                raise ValidationError("operation_id must be a LAB operation ID")
+            operation = self.capabilities.get(operation_id)
+            if (operation.character.casefold() != character.casefold()
+                    or not operation.capability.startswith("controller.")):
+                raise ValidationError("operation was not found for this character")
+        else:
+            history = [op for op in self.capabilities.history(character)
+                       if op.capability.startswith("controller.")]
+            if not history:
+                return {"character": character, "status": "unavailable", "reason": "no_retained_controller_operation"}
+            operation = history[-1]
+        return operation_report(self._operation_mapping(operation))
+
     def inventory_find(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         request = _strict(
             payload,
@@ -605,15 +667,21 @@ class SessionHub:
         return {"character": character, "items": items, "total": len(items)}
 
     def perform(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        character, capability, arguments = self._perform_request(payload)
-        operation = self.capabilities.perform(character, capability, arguments)
+        character, capability, arguments, generation, timeout = self._perform_request(payload)
+        options = {} if generation is None else {"expected_generation": generation}
+        if timeout is not None:
+            options["timeout_seconds"] = timeout
+        operation = self.capabilities.perform(character, capability, arguments, **options)
         return self._operation_mapping(operation)
 
     def start_operation(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Admit an operation and return immediately with its stable ID."""
 
-        character, capability, arguments = self._perform_request(payload)
-        operation = self.capabilities.start(character, capability, arguments)
+        character, capability, arguments, generation, timeout = self._perform_request(payload)
+        options = {} if generation is None else {"expected_generation": generation}
+        if timeout is not None:
+            options["timeout_seconds"] = timeout
+        operation = self.capabilities.start(character, capability, arguments, **options)
         return self._operation_mapping(operation)
 
     def watch_operation(self, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -657,10 +725,26 @@ class SessionHub:
         request = _strict(
             payload,
             label="operation stop request",
-            allowed={"character"},
+            allowed={"character", "operation_id", "expected_generation"},
             required={"character"},
         )
         character = _character(request["character"])
+        if "operation_id" in request or "expected_generation" in request:
+            if not {"operation_id", "expected_generation"}.issubset(request):
+                raise ValidationError("exact stop requires operation_id and expected_generation")
+            operation_id = _text(request["operation_id"], "operation_id", maximum=64)
+            generation = _text(request["expected_generation"], "expected_generation", maximum=128)
+            operation = self.capabilities.get(operation_id)
+            bound_generation = (operation.start_state.generation if operation.start_state is not None
+                                else operation.expected_generation)
+            if operation.character.casefold() != character.casefold() or generation != bound_generation:
+                raise ValidationError("stop identity does not match the operation")
+            if operation.status in {"succeeded", "failed", "timed_out", "interrupted"}:
+                return {"character": character, "stopped": False, "operation_id": operation_id,
+                        "reason": "operation_already_terminal"}
+            self.capabilities.interrupt(operation_id)
+            return {"character": character, "stopped": True, "stop_requested": True,
+                    "operation_id": operation_id}
         active = [
             operation
             for operation in self.capabilities.history(character)
@@ -670,6 +754,8 @@ class SessionHub:
             return {"character": character, "stopped": False, "reason": "no_active_operation"}
         if len(active) != 1:
             raise ValidationError("multiple active operations require explicit inspection")
+        if self.capabilities.is_test_operation(active[0]):
+            raise ValidationError("test run stop requires operation_id and expected_generation")
         self.capabilities.interrupt(active[0].operation_id)
         return {
             "character": character,
@@ -677,14 +763,25 @@ class SessionHub:
             "operation_id": active[0].operation_id,
         }
 
+    def control_operation(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Admit a registered control on one exact operation, not another launch."""
+        fields = {"character", "operation_id", "expected_generation", "control"}
+        request = _strict(payload, label="operation control request", allowed=fields, required=fields)
+        return self.capabilities.control_controller(
+            _text(request["operation_id"], "operation_id", maximum=64),
+            character=_character(request["character"]),
+            expected_generation=_text(request["expected_generation"], "expected_generation", maximum=128),
+            control=_text(request["control"], "control", maximum=16),
+        )
+
     @staticmethod
     def _perform_request(
         payload: Mapping[str, Any],
-    ) -> tuple[str, str, dict[str, Any]]:
+    ) -> tuple[str, str, dict[str, Any], str | None, float | None]:
         request = _strict(
             payload,
             label="perform request",
-            allowed={"character", "capability", "args"},
+            allowed={"character", "capability", "args", "expected_generation", "timeout_seconds"},
             required={"character", "capability"},
         )
         character = _character(request["character"])
@@ -694,7 +791,15 @@ class SessionHub:
         arguments = request.get("args", {})
         if not isinstance(arguments, Mapping):
             raise ValidationError("args must be an object")
-        return character, capability, dict(arguments)
+        generation = (None if "expected_generation" not in request else
+                      _text(request["expected_generation"], "expected_generation", maximum=128))
+        timeout = request.get("timeout_seconds")
+        if "timeout_seconds" in request:
+            if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                    or not math.isfinite(timeout) or not 0 < timeout <= 300):
+                raise ValidationError("timeout_seconds must be positive and at most 300")
+            timeout = float(timeout)
+        return character, capability, dict(arguments), generation, timeout
 
     @staticmethod
     def _knowledge_mapping(excerpt: KnowledgeExcerpt) -> dict[str, Any]:

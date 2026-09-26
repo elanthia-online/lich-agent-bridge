@@ -14,6 +14,9 @@ interfaces, not a guarantee about any user's installation or live character.
 - Private inventory/item dossiers and timestamped character observations.
 - A bounded evidence loop with fixed INFO/SKILLS recon behind existing gates.
 - Authenticated actions, registered operations, CLI, and typed MCP access.
+- An opt-in trusted non-combat script-test pilot: offline pinned registration,
+  fixed cases/assertions, exact-operation stop, owned-child cleanup, and private
+  reports. See [scope and verification gates](Script-Test-Pilot-Plan.md).
 - An optional frontend-state presentation adapter.
 
 No character notes, personal scripts, combat strategies, or hunting profiles are

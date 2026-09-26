@@ -45,6 +45,13 @@ See [Architecture](wiki/project/Architecture.md), [Protocol](wiki/project/Protoc
 - A configured answer backend
 - The Ruby `sqlite3` gem for durable inventory tracking
 
+Optional Bigshot Quick and EO Hunter controllers require the companion native
+Lich support described in [controller setup](examples/controllers/README.md).
+With a valid, explicitly
+empty controller registry, older Lich builds can still run explicit inventory
+refreshes using initial ownership checks; native per-command guards are used
+whenever available. See [inventory compatibility](wiki/project/Setup-and-Operations.md#install-lich-dependencies).
+
 The current default backend is the locally installed Codex CLI using its existing ChatGPT login. A direct OpenAI Responses API adapter and an OpenAI-compatible Chat Completions adapter for local servers such as llama.cpp are also available. Named profiles select the provider, model, reasoning effort, timeout, and an optional bounded local instructions file.
 
 Current development and live testing are Linux-oriented. The optional MCP adapter additionally requires Node.js, npm, and the native build prerequisites used by `isolated-vm`.
@@ -54,7 +61,7 @@ Current development and live testing are Linux-oriented. The optional MCP adapte
 Clone the repository and install the Python package:
 
 ```bash
-git clone https://github.com/therealatari/lich-agent-bridge.git
+git clone https://github.com/elanthia-online/lich-agent-bridge.git
 cd lich-agent-bridge
 python3 -m venv .venv
 source .venv/bin/activate
@@ -83,9 +90,21 @@ Copy or symlink these files into the active Lich `scripts` directory:
 - `lich/lab-inventory.lic`
 - `lich/lich-state-core.rb`
 - `lich/lab-controller-registry.rb`
+- `lich/lab-controller-controls.rb`
+- `lich/lab-combat-report.rb`
+- `lich/lab-test-runner.rb`
 - `lich/lab-controllers.json`
 
 Each file needs its own entry in the active scripts directory because Lich resolves runtime dependencies there, even when `lab.lic` itself is a symlink.
+
+Optional combat reporting reuses Lich's `Combat::Recorder`; LAB does not start
+or replace it. With post-commit receipt protocol 1 and Hunter trial context
+support, `labctl combat-report CHARACTER --operation-id ID` reads the retained
+report after verified refuge return. Agents use `combat.report` in questions or
+`lab.combat_report` through MCP. Omitting the ID selects the latest controller
+operation, not a general hunt-history search. Missing support/data is reported
+as unavailable. See the [combat-reporting contract](wiki/project/Combat-Reporting-Plan.md)
+for prerequisites, limits, and pending live acceptance.
 
 The bundled controller manifest is empty. Personal combat routines, hunting
 profiles, character builds, and equipment configuration are not distributed or
@@ -130,20 +149,61 @@ Management:
 ;lab forget
 ;lab actions on
 ;lab actions off
+;lab full access on
+;lab full access off
 ;lab approve
 ;lab approve auto
 ;lab approve auto off
 ;lab operation stop
+;lab recover
 ;lab stop
 ```
 
-The default catalog contains four capabilities:
+For a retained failed controlled-outing handoff, `;lab recover` lists the exact run ID.
+After restoring the character, `;lab recover RUN_ID confirm` verifies refuge,
+original equipment and released ownership before acknowledging that one run.
+It sends no game commands and does not turn the failed test into a pass.
+An agent acting on the player's explicit instruction can perform the same narrow
+operation through `session.recover_controller` with the exact run ID,
+`confirm: true`, and the current expected session generation. The owning Lich
+session repeats the native checks and publishes matching recovery evidence;
+guarded mode exposes no general remote script-command capability.
+If the sidecar restarted and lost its in-memory pending tuple, the retained
+native run remains authoritative: its authenticated exact-ID receipt supplies
+the controller, prior generation, refuge and original hands for the same checks.
+See [recovery checks](wiki/project/Controller-Controls.md#player-confirmed-recovery-after-a-lab-restart).
+
+The default catalog contains seven capabilities:
 
 - `character.recon`: fixed INFO/SKILLS inspection with verified observations.
+- `travel.go2`: exact-room native go2 travel with bounded execution and verified
+  arrival; requires compatible guarded Lich/go2 builds and explicit player authorization.
 - `item.audit`: attributed diagnostics for an exact current item.
 - `room.loot`: a bounded ELoot sweep with admission and outcome checks.
 - `hunt.prepare`: unavailable without a configured character profile; no profiles
   are bundled.
+- `session.recover_controller`: acknowledge one exact retained controller handoff
+  after explicit operator confirmation and verified native recovery state.
+- `session.command`: in a locally enabled full-access session, deliver one
+  generation-bound, audited game-input or Lich script command without requiring
+  a profile. The
+  receipt proves delivery only; callers must inspect fresh state or game evidence
+  before claiming that the requested effect occurred.
+
+Full access is an exploratory-testing mode, guarded by default for a new character.
+The player enables it with `;lab full access on`; that preference is saved in
+native Lich settings for this game/character and restored on bridge restart or
+relog. `;lab full access off` saves the opposite preference. Missing or malformed
+settings remain guarded. `;lab actions off`, stopping LAB, or ending the Lich
+session removes current execution authority without erasing the saved preference.
+Full access accepts one
+game-input line or one semicolon-prefixed Lich command at a time. Lich commands
+use Lich's native client dispatcher, so script arguments and lifecycle commands
+retain their normal semantics. Frontend commands, inline Ruby execution (`;e`,
+`;exec`, and aliases), multiline input, and command chaining are still rejected.
+Locally installed Lich scripts are trusted Ruby code, not a LAB sandbox.
+Repeatable workflows should graduate to typed capabilities or registered
+controllers once their contract is understood.
 
 The controller manifest is empty. Retrieve the live catalog and its schemas
 instead of hard-coding availability:
@@ -151,10 +211,31 @@ instead of hard-coding availability:
 - MCP: `lab.capabilities`
 - HTTP: `POST /v1/session/capabilities`
 
+An optional [trusted script-test pilot](wiki/project/Developer-Testing.md#trusted-script-test-pilot)
+uses this same controller interface for short, explicitly registered non-combat
+suites. Offline `labctl tests prepare` prints a pinned registration for review;
+it does not install or enable one. The example is a harmless lifecycle probe,
+not a sandbox or an unattended gameplay test campaign.
+For that pilot, also install `lich/lab-test-runner.lic` as a real file alongside
+the helper and reviewed suite files; suite pinning rejects symlink substitutions.
+
+An optional [EO Hunter trial campaign](examples/controllers/README.md#eo-hunter-trial-campaign)
+can execute a short sequence of private, reviewed combat routines at game speed,
+record structured evidence, and return to a player-selected refuge before the
+agent evaluates results. Installing LAB alone does not enable it; the shipped
+controller registry remains empty.
+
 Questions use a bounded evidence loop, not a list of question keywords. The model
 can answer from the supplied context or request current state, character
-observations, recorded item facts, or configured wiki searches. LAB validates and
-executes those requests; the model cannot supply arbitrary commands.
+observations, recorded item facts, or configured wiki research. `knowledge.search`
+discovers compact source handles; `knowledge.read` reads a selected source or
+section with bounded continuations. Reference mechanics, selected-character
+notes, and development documentation have separate search scopes. LAB validates
+those requests; the model cannot supply arbitrary commands, paths, or URLs.
+
+Known limitation: multi-part questions can find the right page but miss the
+specific interaction-rule passage. Further passage-selection tuning is tracked
+in [issue #7](https://github.com/elanthia-online/lich-agent-bridge/issues/7).
 
 `character.read` reuses recent same-session INFO/SKILLS observations and can
 request missing or older-than-two-minute categories through the existing recon
@@ -170,6 +251,26 @@ rounds, four requests per batch, and eight requests total under the same questio
 deadline. `;lab forget` invalidates the question and revokes its pending recon;
 commands already dispatched cannot be unsent. `;lab sources` shows the supplied
 references and diagnostics.
+
+Developers can use `labctl ask CHARACTER "QUESTION"` to exercise that same
+pipeline from a shell, or `labctl questions CHARACTER CORPUS.json --output
+/PRIVATE/PATH/results.json` for sequential question cases. Both default to
+server-enforced read-only questions; explicit `--allow-recon` permits only the
+existing independently gated INFO/SKILLS path. They require a fresh selected
+session, do not log characters in, and preserve normal dialogue. Keep corpora and
+results private. See [question testing](wiki/project/Developer-Testing.md#direct-questions-and-private-question-corpora)
+for the format, safety boundary, and manual quality-review requirements.
+
+Evidence allowances are configurable per agent profile: defaults are 12,000
+characters per result and 36,000 in the evidence context supplied on each turn.
+A question-local workspace retains bounded results outside that context: later
+reads can displace earlier discovery results, and repeating a request reactivates
+cached evidence without repeating game commands. Source reporting distinguishes
+discovery snippets from read passages and lists only the final context's sources.
+Larger
+allowances can improve multi-source answers but increase model input and may
+send more private context to the configured backend. See
+[evidence settings](wiki/project/Setup-and-Operations.md#evidence-allowances).
 
 ## Shell interface
 
@@ -273,9 +374,34 @@ GSWiki lookup. Live excerpts retain their GSWiki URL, revision, and retrieval
 time; a small local cache avoids repeating the same request.
 
 Use `labctl wiki status` to inspect mirror path, size, schema health, last sync,
-and freshness threshold. `labctl wiki refresh` builds a replacement mirror and
+freshness threshold, and passage-index readiness/coverage. `labctl wiki refresh` builds a replacement mirror and
 only swaps it in after a successful sync, preserving the previous usable mirror
 on failure.
+
+`labctl wiki index` adds or rebuilds the local passage index without downloading
+pages or making old sources fresh. Explicit indexing regenerates derived tables
+from the retained pages, including repair of damaged derived content; ordinary
+sync reuses unchanged snapshots. Keep mirror writers offline while it runs;
+it requires a DELETE-journal mirror (the sync default) and enough free disk space
+for a replacement database. It does not convert an active WAL database.
+Subsequent syncs maintain the index. Missing or unusable indexes fall back to
+page search; questions never trigger database migration.
+
+Indexed research exposes matching passages through the same `knowledge.search`
+and `knowledge.read` tools. Ranges carry revision and normalized-text identity,
+so replaced pages cannot silently reinterpret old offsets. Default retrieval is
+local lexical search and does not expand MediaWiki templates.
+For an offline synthetic comparison, run
+`python3 scripts/benchmark-wiki-retrieval.py --iterations 5`.
+See the [passage-index plan](wiki/project/Passage-Index-Plan.md) for scope and limits.
+Selected pages also support focused passage recovery and contiguous coverage
+windows within the existing read limit. Optional local semantic source reranking
+is available through the `semantic` installation extra and one
+`knowledge.semantic_model_directory` setting. It protects explicitly named
+references, caches bounded window vectors, and falls back to lexical order when
+unavailable or over allowance. Nothing downloads automatically; base installation
+remains dependency-free. See [semantic setup and limits](wiki/project/Semantic-Reranking.md)
+and the [coverage experiments](wiki/project/Retrieval-Coverage-Expansion.md).
 
 General-web fallback is separately opt-in. Set a selected profile's
 `web_search = true`, choose `general_web_provider = "brave"`, and provide only
@@ -335,7 +461,12 @@ The core Ruby bridge tests require a Ruby runtime compatible with the installed 
 ```bash
 ruby tests/lab_dispatcher_test.rb
 ruby tests/lab_bridge_test.rb
+ruby tests/lab_go2_travel_test.rb
+ruby tests/lab_full_access_test.rb
 ruby tests/lab_controller_registry_test.rb
+ruby tests/lab_controller_controls_test.rb
+ruby tests/lab_controller_control_binding_test.rb
+ruby tests/lab_test_runner_test.rb
 ruby tests/lab_inventory_test.rb
 bash tests/play_gemstone_detach_test.sh
 ```

@@ -63,9 +63,17 @@ jobs:
       - run: |
           ruby tests/lab_dispatcher_test.rb
           ruby tests/lab_bridge_test.rb
+          ruby tests/lab_combat_report_test.rb
+          ruby tests/lab_go2_travel_test.rb
+          ruby tests/lab_full_access_test.rb
+          ruby tests/lab_recovery_test.rb
           ruby tests/despana_state_test.rb
           ruby tests/lab_controller_registry_test.rb
+          ruby tests/lab_controller_controls_test.rb
+          ruby tests/lab_controller_control_binding_test.rb
+          ruby tests/lab_test_runner_test.rb
           ruby tests/lab_inventory_test.rb
+          PYTHONPATH=src python3 -m unittest tests.test_script_tests.ScriptSuitePreparationTests.test_shipped_example_preparation_loads_in_python_and_ruby_parsers
           bash tests/play_gemstone_detach_test.sh
   mcp:
     runs-on: ubuntu-24.04

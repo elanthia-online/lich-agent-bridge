@@ -27,6 +27,20 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "must not be blank"):
             AskRequest.from_mapping({"character": "Testscout", "question": "  "})
 
+    def test_ask_read_only_and_session_binding_are_strict_and_optional(self):
+        payload = {"character": "Testmage", "question": "My training?"}
+        legacy = AskRequest.from_mapping(payload)
+        self.assertFalse(legacy.read_only)
+        self.assertIsNone(legacy.expected_generation)
+        protected = AskRequest.from_mapping({**payload, "read_only": True, "expected_generation": "one"})
+        self.assertTrue(protected.read_only)
+        self.assertEqual(protected.expected_generation, "one")
+        for field, values in (("read_only", [None, 0, 1, "false", []]),
+                              ("expected_generation", [None, "", " ", 1, [], "x" * 129])):
+            for value in values:
+                with self.subTest(field=field, value=value), self.assertRaises(ValidationError):
+                    AskRequest.from_mapping({**payload, field: value})
+
     def test_snapshot_parses_bounded_structured_state(self):
         snapshot = CharacterSnapshot.from_mapping(
             {

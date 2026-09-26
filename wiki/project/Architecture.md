@@ -41,9 +41,17 @@ Inventory and character observations persist in a user-selected private
 database. These records are evidence with dates, not current-state guarantees.
 Model text is not automatically written into durable knowledge.
 
-Knowledge adapters share one search interface across Markdown notes, local
-GSWiki SQLite, and configured online fallback. The model does not receive
-filesystem, SQL, or unrestricted URL access.
+Knowledge adapters support scoped discovery and deliberate reading across
+Markdown notes, local GSWiki SQLite, and configured live GSWiki. A question-owned
+research session resolves opaque source/section/continuation handles; a separate
+evidence workspace retains bounded results and selects each turn's context.
+Legacy search remains available. The model does not receive filesystem, SQL, or
+unrestricted URL access; general-web fallback remains discovery-only.
+
+Research candidate recall stays inside the knowledge adapter. The pure discovery
+ranker orders scoped snapshots across sources without I/O or additional model
+calls; source handles, section reads, and final evidence selection retain their
+own existing responsibilities.
 
 ## Questions
 

@@ -211,6 +211,7 @@ class ContextAssembler:
         knowledge_question: str | None = None,
         follow_up_question: str | None = None,
         dialogue_history: Sequence[Mapping[str, Any]] = (),
+        include_knowledge: bool = True,
     ) -> AssembledContext:
         selected_character = _short_text(character, 40)
         selected_question = _short_text(question, 2_000)
@@ -226,10 +227,10 @@ class ContextAssembler:
             for alert in alerts
         )
         inventory = self._inventory_items(selected_character, selected_question)
-        knowledge, diagnostics = self._knowledge_items(
+        knowledge, diagnostics = (self._knowledge_items(
             selected_character,
             selected_question if knowledge_question is None else knowledge_question,
-        )
+        ) if include_knowledge else ((), ()))
         raw = self._raw_observations(observations, selected_character)
         return AssembledContext(
             character=selected_character,

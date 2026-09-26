@@ -15,9 +15,10 @@ _GLOBAL = re.compile(r"^\$lab_[a-z0-9_]+$")
 _TOKEN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$", re.IGNORECASE)
 _PLACEHOLDER = re.compile(r"\{([a-z][a-z0-9_]*)\}")
 _LANES = frozenset({"movement", "combat", "inventory", "communication"})
-_KINDS = frozenset({"launch", "stop", "signal", "status", "sync"})
+_KINDS = frozenset({"launch", "stop", "signal", "status", "sync", "control"})
+CONTROLLER_CONTROLS = frozenset({"status", "hold", "resume", "retreat"})
 _CATEGORIES = frozenset({"inspection", "configuration", "movement", "combat"})
-_PARAMETER_TYPES = frozenset({"enum", "numeric", "flag_suffix"})
+_PARAMETER_TYPES = frozenset({"enum", "numeric", "flag_suffix", "action_id"})
 
 
 def _strict(
@@ -99,8 +100,8 @@ class ControllerParameter:
         if parameter_type == "enum":
             if not values or len({item.casefold() for item in values}) != len(values):
                 raise ConfigurationError(f"{label}.values must be nonempty and unique")
-        elif parameter_type == "numeric" and values:
-            raise ConfigurationError(f"{label} numeric parameters do not accept values")
+        elif parameter_type in {"numeric", "action_id"} and values:
+            raise ConfigurationError(f"{label} {parameter_type} parameters do not accept values")
         elif parameter_type == "flag_suffix":
             if not isinstance(default, bool):
                 raise ConfigurationError(f"{label}.default must be boolean")
@@ -119,9 +120,15 @@ class ControllerParameter:
             return "|".join(re.escape(item) for item in self.values)
         if self.type == "numeric":
             return r"[0-9]+"
+        if self.type == "action_id":
+            return r"(?-i:[0-9a-f]{16})"
         return re.escape(self.true_value)
 
     def render(self, raw: object) -> str:
+        if self.type == "action_id":
+            if not isinstance(raw, str) or re.fullmatch(r"[0-9a-f]{16}", raw) is None:
+                raise ValidationError(f"{self.name} must be a lowercase 16-digit action ID")
+            return raw
         if self.type == "enum":
             candidate = str(raw)
             canonical = next(
@@ -159,6 +166,8 @@ class ControllerParameter:
             return {"type": "string", "enum": list(self.values)}
         if self.type == "numeric":
             return {"type": "string", "pattern": "^[0-9]+$"}
+        if self.type == "action_id":
+            return {"type": "string", "pattern": "^[0-9a-f]{16}$"}
         return {"type": "boolean", "default": self.default}
 
 
@@ -227,6 +236,17 @@ class ControllerAction:
             ControllerParameter.from_mapping(item, f"{label}.parameters[{index}]")
             for index, item in enumerate(raw_parameters)
         )
+        if kind == "control" and (
+            name not in CONTROLLER_CONTROLS
+            or script_args_template != ""
+            or launch_mode is not None
+            or len(parameters) != 1
+            or parameters[0].name != "run_id"
+            or parameters[0].type != "action_id"
+            or category != ("inspection" if name == "status" else "combat")
+            or (name != "status" and not confirmation)
+        ):
+            raise ConfigurationError(f"{label} has an invalid exact-run control contract")
         names = tuple(item.name for item in parameters)
         if len(set(names)) != len(names):
             raise ConfigurationError(f"{label}.parameters contains duplicates")
@@ -293,10 +313,17 @@ class ControllerAction:
         found = self.pattern.fullmatch(command)
         if found is None:
             return None
-        return {
-            parameter.name: parameter.normalize_capture(found.group(parameter.name))
-            for parameter in self.parameters
-        }
+        try:
+            return {
+                parameter.name: (
+                    parameter.render(found.group(parameter.name))
+                    if parameter.type == "action_id"
+                    else parameter.normalize_capture(found.group(parameter.name))
+                )
+                for parameter in self.parameters
+            }
+        except ValidationError:
+            return None
 
     def argument_schema(self) -> dict[str, Any]:
         return {
@@ -325,6 +352,8 @@ class ControllerDefinition:
     safe_handoff: Mapping[str, Any]
     capability_action: str
     actions: tuple[ControllerAction, ...]
+    test_suite: Mapping[str, Any] | None = None
+    control_owner_scripts: tuple[str, ...] = ()
 
     def action(self, name: str) -> ControllerAction:
         selected = next((item for item in self.actions if item.name == name), None)
@@ -338,7 +367,7 @@ class ControllerDefinition:
 
     def safe_room(self, arguments: Mapping[str, object]) -> str | None:
         kind = self.safe_handoff["kind"]
-        if kind == "room":
+        if kind in {"room", "quick_refuge", "controller_refuge"}:
             return str(self.safe_handoff["room_id"])
         if kind == "profile_room":
             profile = str(arguments.get("profile", ""))
@@ -423,6 +452,8 @@ def _controller_from_mapping(raw: Any, label: str) -> ControllerDefinition:
             "safe_handoff",
             "capability_action",
             "actions",
+            "test_suite",
+            "control_owner_scripts",
         },
         required={
             "name",
@@ -451,15 +482,31 @@ def _controller_from_mapping(raw: Any, label: str) -> ControllerDefinition:
     if not lanes.issubset(_LANES):
         raise ConfigurationError(f"{label}.lanes is invalid")
     owner_scripts = _string_array(value["owner_scripts"], f"{label}.owner_scripts")
+    control_owners = (
+        _string_array(value["control_owner_scripts"], f"{label}.control_owner_scripts")
+        if "control_owner_scripts" in value else ()
+    )
     safe = _strict(
         value["safe_handoff"],
         label=f"{label}.safe_handoff",
-        allowed={"kind", "room_id", "rooms"},
+        allowed={"kind", "room_id", "rooms", "return_seconds"},
         required={"kind"},
     )
     kind = str(safe["kind"])
-    if kind not in {"owners_released", "room", "profile_room"}:
+    refuge_kinds = {"quick_refuge", "controller_refuge"}
+    if kind not in {"owners_released", "room", "profile_room", "quick_area", *refuge_kinds}:
         raise ConfigurationError(f"{label}.safe_handoff.kind is unsupported")
+    if "return_seconds" in safe and kind not in refuge_kinds:
+        raise ConfigurationError(f"{label}.return_seconds requires a refuge handoff")
+    if kind in refuge_kinds:
+        room = safe.get("room_id")
+        seconds = safe.get("return_seconds")
+        if (set(safe) != {"kind", "room_id", "return_seconds"}
+                or isinstance(room, bool) or not re.fullmatch(r"[1-9][0-9]*", str(room))
+                or str(room) == "4" or len(str(room)) > 12
+                or type(seconds) is not int or not 10 <= seconds <= 120
+                or not {"movement", "combat"}.issubset(lanes)):
+            raise ConfigurationError(f"{label}.{kind} requires an exact refuge and 10–120 return seconds")
     if kind == "room" and not str(safe.get("room_id", "")).isdigit():
         raise ConfigurationError(f"{label}.safe_handoff.room_id must be numeric")
     if kind == "profile_room":
@@ -480,9 +527,56 @@ def _controller_from_mapping(raw: Any, label: str) -> ControllerDefinition:
     capability_action = _name(value["capability_action"], f"{label}.capability_action")
     if not any(item.name == capability_action for item in actions):
         raise ConfigurationError(f"{label}.capability_action was not found")
+    if any(item.kind == "control" for item in actions) and not any(
+        item.name == capability_action and item.kind == "launch" for item in actions
+    ):
+        raise ConfigurationError(f"{label} controls require a launch capability")
+    if any(item.kind == "control" for item in actions):
+        if (script.casefold() not in {item.casefold() for item in control_owners}
+                or not {item.casefold() for item in control_owners}.issubset(
+                    item.casefold() for item in owner_scripts)):
+            raise ConfigurationError(f"{label} requires explicit control_owner_scripts within owner_scripts")
+    elif control_owners:
+        raise ConfigurationError(f"{label}.control_owner_scripts requires registered controls")
+    for launch in (item for item in actions if item.kind == "launch"):
+        tokens = launch.script_args_template.split()
+        mode = tokens[1] if len(tokens) >= 2 and tokens[0].casefold() == "quick" else ""
+        may_seek = mode.casefold() == "seek" or any(
+            mode == "{" + parameter.name + "}" and "seek" in {v.casefold() for v in parameter.values}
+            for parameter in launch.parameters)
+        if script == "bigshot" and may_seek and (
+                kind not in {"quick_area", "quick_refuge"} or not {"movement", "combat"}.issubset(lanes)):
+            raise ConfigurationError(f"{label}.seek requires quick_area/quick_refuge and movement/combat lanes")
+    if kind in {"quick_area", "quick_refuge"}:
+        launches = [item for item in actions if item.kind == "launch"]
+        if ((kind == "quick_area" and set(safe) != {"kind"}) or script != "bigshot" or not control_owners
+                or not launches):
+            raise ConfigurationError(f"{label}.{kind} requires native controlled Bigshot without caller room lists")
+        for launch in launches:
+            tokens = launch.script_args_template.split()
+            area_options = [index for index, token in enumerate(tokens) if token.startswith("--area")]
+            if (not tokens or tokens[0] != "quick" or len(area_options) != 1
+                    or tokens[area_options[0]:area_options[0] + 2] != ["--area", "profile"]
+                    or any(parameter.type == "flag_suffix" for parameter in launch.parameters)
+                    or any(token.startswith("--") and "{" in token for token in tokens)
+                    or "--" in tokens):
+                raise ConfigurationError(f"{label}.{kind} launches require explicit --area profile")
+    if kind == "controller_refuge":
+        launches = [item for item in actions if item.kind == "launch"]
+        if not control_owners or not launches:
+            raise ConfigurationError(f"{label}.controller_refuge requires a native controlled script")
+        for launch in launches:
+            tokens = launch.script_args_template.split()
+            if (not tokens or any(parameter.type == "flag_suffix" for parameter in launch.parameters)
+                    or any(token.startswith("--supervised-") for token in tokens)
+                    or any(token.startswith("--") and "{" in token for token in tokens)
+                    or "--" in tokens):
+                raise ConfigurationError(
+                    f"{label}.controller_refuge launches cannot supply private supervisor flags"
+                )
     if any(item.kind == "signal" for item in actions) and signal_global is None:
         raise ConfigurationError(f"{label}.signal_global is required")
-    return ControllerDefinition(
+    controller = ControllerDefinition(
         name,
         script,
         summary,
@@ -494,7 +588,57 @@ def _controller_from_mapping(raw: Any, label: str) -> ControllerDefinition:
         dict(safe),
         capability_action,
         actions,
+        _test_suite_metadata(value["test_suite"], label) if "test_suite" in value else None,
+        control_owners,
     )
+    if controller.test_suite is not None:
+        _validate_test_controller(controller, label)
+    return controller
+
+
+def _test_suite_metadata(raw: Any, label: str) -> Mapping[str, Any]:
+    value = _strict(raw, label=f"{label}.test_suite", allowed={"manifest", "files"},
+                    required={"manifest", "files"})
+    files = value["files"]
+    if not isinstance(files, Mapping) or not 4 <= len(files) <= 67:
+        raise ConfigurationError(f"{label}.test_suite.files must contain 4–67 pinned files")
+    path_pattern = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*")
+    for path, digest in files.items():
+        if (not isinstance(path, str) or len(path) > 240 or path_pattern.fullmatch(path) is None
+                or not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None):
+            raise ConfigurationError(f"{label}.test_suite has an invalid relative path or SHA-256")
+    manifest = value["manifest"]
+    if (not isinstance(manifest, str) or not manifest.endswith(".json") or manifest not in files
+            or not {"lab-test-runner.lic", "lab-test-runner.rb"}.issubset(files)
+            or not any(path.endswith(".lic") and path != "lab-test-runner.lic" for path in files)):
+        raise ConfigurationError(f"{label}.test_suite must pin its manifest, runner, and target")
+    return {"manifest": manifest, "files": dict(files)}
+
+
+def _validate_test_controller(controller: ControllerDefinition, label: str) -> None:
+    suite = controller.test_suite
+    assert suite is not None
+    suite_id = controller.name.removeprefix("test-")
+    if (not controller.name.startswith("test-") or _NAME.fullmatch(suite_id) is None
+            or controller.script != "lab-test-runner" or len(controller.characters) != 1
+            or controller.result_global != "$lab_test_result" or controller.signal_global != "$lab_test_cancel"
+            or controller.lanes != {"movement", "combat"}
+            or controller.safe_handoff["kind"] != "room"
+            or "lab-test-runner" not in controller.owner_scripts
+            or len(controller.actions) != 1 or controller.capability_action != "start"):
+        raise ConfigurationError(f"{label} does not match the fixed test-runner contract")
+    action = controller.action("start")
+    params = {parameter.name: parameter for parameter in action.parameters}
+    if (action.kind != "launch" or action.launch_mode != "start"
+            or action.category != "configuration" or not action.confirmation_required
+            or action.command_template != f"lab-test {suite_id} {{revision}} {{case_id}}"
+            or action.script_args_template != f"{suite_id} {{revision}} {{case_id}}"
+            or set(params) != {"revision", "case_id"}
+            or params["revision"].type != "enum"
+            or params["revision"].values != (suite["files"][suite["manifest"]],)
+            or params["case_id"].type != "enum" or "all" not in params["case_id"].values
+            or not 2 <= len(params["case_id"].values) <= 21):
+        raise ConfigurationError(f"{label} has invalid test launch arguments or policy")
 
 
 def default_controller_manifest_path() -> Path:

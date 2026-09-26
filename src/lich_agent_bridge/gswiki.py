@@ -22,7 +22,7 @@ from .settings import Settings
 
 DEFAULT_API_URL = "https://gswiki.play.net/api.php"
 DEFAULT_NAMESPACES = (0, 4, 10, 12, 14, 102, 104, 106, 108, 112, 828)
-USER_AGENT = "lich-agent-bridge/0.2 (+https://github.com/therealatari/lich-agent-bridge)"
+USER_AGENT = "lich-agent-bridge/0.2 (+https://github.com/elanthia-online/lich-agent-bridge)"
 
 _COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 _REF = re.compile(r"<ref\b[^>]*>.*?</ref\s*>", re.IGNORECASE | re.DOTALL)
@@ -126,6 +126,12 @@ def sync(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('api_url', ?)",
                 (api_url,),
             )
+        # The same unpublished mirror copy owns the derived ranges. Failed
+        # normalization or validation therefore cannot publish a partial index.
+        from .passage_index import build_index
+
+        build_index(connection)
+        connection.commit()
         connection.close()
         connection = None
         os.replace(temporary_path, database)
@@ -210,7 +216,9 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             INSERT INTO pages_fts(pages_fts, rowid, title, plain_text)
             VALUES ('delete', old.page_id, old.title, old.plain_text);
         END;
-        CREATE TRIGGER IF NOT EXISTS pages_after_update AFTER UPDATE ON pages BEGIN
+        DROP TRIGGER IF EXISTS pages_after_update;
+        CREATE TRIGGER pages_after_update AFTER UPDATE ON pages
+        WHEN old.title IS NOT new.title OR old.plain_text IS NOT new.plain_text BEGIN
             INSERT INTO pages_fts(pages_fts, rowid, title, plain_text)
             VALUES ('delete', old.page_id, old.title, old.plain_text);
             INSERT INTO pages_fts(rowid, title, plain_text)
@@ -228,6 +236,18 @@ def _upsert_page(
     slot = revision.get("slots", {}).get("main", {})
     wikitext = slot.get("content", "")
     title = str(page["title"])
+    existing = connection.execute(
+        "SELECT wikitext, title, namespace, revision_id FROM pages WHERE page_id = ?",
+        (int(page["pageid"]),),
+    ).fetchone()
+    if existing is not None and tuple(existing) == (
+        str(wikitext), title, int(page["ns"]), revision.get("revid")
+    ):
+        connection.execute(
+            "UPDATE pages SET last_seen = ?, revision_timestamp = ? WHERE page_id = ?",
+            (sync_id, revision.get("timestamp"), int(page["pageid"])),
+        )
+        return
     connection.execute(
         """
         INSERT INTO pages(

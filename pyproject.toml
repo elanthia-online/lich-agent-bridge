@@ -13,10 +13,13 @@ authors = [{ name = "ATARI" }]
 classifiers = ["License :: OSI Approved :: GNU General Public License v3 (GPLv3)"]
 dependencies = []
 
+[project.optional-dependencies]
+semantic = ["numpy>=1.26,<3", "onnxruntime>=1.18,<2", "tokenizers>=0.20,<1"]
+
 [project.urls]
-Homepage = "https://github.com/therealatari/lich-agent-bridge"
-Repository = "https://github.com/therealatari/lich-agent-bridge"
-Issues = "https://github.com/therealatari/lich-agent-bridge/issues"
+Homepage = "https://github.com/elanthia-online/lich-agent-bridge"
+Repository = "https://github.com/elanthia-online/lich-agent-bridge"
+Issues = "https://github.com/elanthia-online/lich-agent-bridge/issues"
 
 [project.scripts]
 lich-agent-bridge = "lich_agent_bridge.server:main"
@@ -26,6 +29,7 @@ lab-gswiki = "lich_agent_bridge.gswiki:main"
 labctl = "lich_agent_bridge.labctl:main"
 lab-character-baseline = "lich_agent_bridge.character_baseline:main"
 lab-lich-corpus = "lich_agent_bridge.lich_corpus:main"
+lab-decisions = "lich_agent_bridge.decisions:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

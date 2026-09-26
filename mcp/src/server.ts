@@ -8,7 +8,7 @@ import { executeCode } from './executor.js';
 import { SDK_TYPE_DECLARATIONS } from './sdk-types.generated.js';
 import { SessionHubClient } from './session-hub-client.js';
 
-export const SERVER_INSTRUCTIONS = `LAB exposes one local GemStone IV session authority. Read lab.snapshot before acting; it is current live state and costs no game command. lab.inventory_find locations are historical observations, never proof of current possession. Use lab.watch for meaningful changes. Use lab.perform only for registered outcome-oriented capabilities; the Python SessionHub and ActionBroker remain final policy authorities. Prefer direct tools for one call and lab.execute_code for three or more dependent reads or compact filtering. Never infer success from command dispatch.`;
+export const SERVER_INSTRUCTIONS = `LAB exposes one local GemStone IV session authority. Read lab.snapshot before acting; it is current live state and costs no game command. lab.inventory_find locations are historical observations, never proof of current possession. Use lab.watch for meaningful changes. Use lab.perform only for registered outcome-oriented capabilities; it returns a stable operation ticket immediately. Poll that ticket with lab.operation_watch until terminal, then verify its evidence and a fresh snapshot. The Python SessionHub and ActionBroker remain final policy authorities. Prefer direct tools for one call and lab.execute_code for three or more dependent reads or compact filtering. Never infer success from command dispatch.`;
 
 function connectionId(req: Request): string {
   const explicit = req.header('x-lab-connection-id') ?? req.header('mcp-session-id');
@@ -42,9 +42,9 @@ export function createApp(config: AdapterConfig) {
           description: entry.description,
           inputSchema: entry.input,
           annotations: {
-            readOnlyHint: entry.route !== 'perform',
-            destructiveHint: entry.route === 'perform',
-            idempotentHint: entry.route !== 'perform',
+            readOnlyHint: entry.route !== 'perform' && entry.route !== 'operationStop',
+            destructiveHint: entry.route === 'perform' || entry.route === 'operationStop',
+            idempotentHint: entry.route !== 'perform' && entry.route !== 'operationStop',
             openWorldHint: false,
           },
         },
@@ -54,7 +54,7 @@ export function createApp(config: AdapterConfig) {
     server.registerTool(
       'lab.execute_code',
       {
-        description: `Execute bounded TypeScript against the isolated LAB SDK. Use for dependent reads, compact aggregation, or reads followed by at most one perform. Long watches must use direct lab.watch.\n${SDK_TYPE_DECLARATIONS}`,
+        description: `Execute bounded TypeScript against the isolated LAB SDK: at most 20 total calls and 8 mutation attempts (perform/stop), default 10s, opt-in maximum 30s. Await dependent operations; Promise.all supports independent characters. Existing per-character busy, generation, broker and native access gates apply to every request. A batch is not atomic; no retries or rollback. Failed or ambiguous mutations block further performs, while reads, operationWatch and exact stop remain available within budget. Steps retain operation IDs/status and unconfirmed admission; success reports execution/transport, not verified game effects. Await all mutations. Ending execution closes dispatch but cannot unsend requests or cancel admitted operations. Isolate watches cap at 1000ms; use direct lab.watch/lab.operation_watch for longer waits and direct lab.stop after budget exhaustion.\n${SDK_TYPE_DECLARATIONS}`,
         inputSchema: EXECUTE_CODE_INPUT,
         annotations: {
           readOnlyHint: false,
