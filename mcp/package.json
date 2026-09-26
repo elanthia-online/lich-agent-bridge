@@ -9,20 +9,21 @@
     "generate:sdk-types": "tsx scripts/generate-sdk-types.ts",
     "check:sdk-types": "tsx scripts/check-sdk-types.ts",
     "test": "tsx --test test/**/*.test.ts",
-    "typecheck": "tsc --noEmit",
-    "build": "tsc -p tsconfig.build.json && cp src/executor-child.cjs dist/executor-child.cjs",
+    "typecheck": "node node_modules/typescript/bin/tsc --noEmit",
+    "build": "node node_modules/typescript/bin/tsc -p tsconfig.build.json && cp src/executor-child.cjs dist/executor-child.cjs",
     "start": "node dist/index.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@typescript/typescript6": "^6.0.2",
     "express": "^5.2.1",
     "isolated-vm": "^6.1.2",
-    "typescript": "^7.0.2",
     "zod": "~4.5.4"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/node": "^25.0.0",
-    "tsx": "^4.20.6"
+    "tsx": "^4.20.6",
+    "typescript": "^7.0.2"
   }
 }

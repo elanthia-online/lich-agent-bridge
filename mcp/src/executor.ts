@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import ts from 'typescript';
+// TypeScript 7 supplies the build CLI, not the legacy in-process compiler API.
+import ts from '@typescript/typescript6';
 import { createBridge, type BridgeState, type ExecutionStep } from './sdk-bridge.js';
 import { SDK_TYPE_DECLARATIONS } from './sdk-types.generated.js';
 import type { SessionHubCaller } from './session-hub-client.js';

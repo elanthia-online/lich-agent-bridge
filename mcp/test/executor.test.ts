@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { EXECUTOR_LIMITS, executeCode, transpileTypeScript } from '../src/executor.js';
 import { EXECUTE_CODE_INPUT } from '../src/tool-registry.js';
@@ -24,6 +25,28 @@ test('TypeScript transpilation accepts annotations and rejects malformed syntax'
   assert.ok('code' in transpileTypeScript("const x: string = 'ok'; return x;"));
   const invalid = transpileTypeScript('const x: : = 1; return x;');
   assert.ok('error' in invalid);
+});
+
+test('typecheck script uses TypeScript 7 even when the runtime compiler provides a tsc binary', () => {
+  const result = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm',
+    ['run', 'typecheck', '--', '--version'], {
+      cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8',
+      timeout: 10_000, shell: process.platform === 'win32',
+    });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Version 7\./);
+});
+
+test('runtime compiler emits enum syntax and the executor preserves typed awaited SDK calls', async () => {
+  const result = await executeCode(`
+    enum Mode { Read = 'read' }
+    const mode: Mode = Mode.Read;
+    const snapshot: CharacterSnapshot = await lab.snapshot({ character: 'Testmage' });
+    return { mode, room: snapshot.room?.id };
+  `, 'runtime-compiler', new ExecutorHub());
+  assert.equal(result.success, true, result.error ?? 'Runtime compilation failed without an error message');
+  assert.deepEqual(result.result, { mode: 'read', room: '42' });
+  assert.equal(result.lab_calls, 1);
 });
 
 test('execute_code chains and batches reads but returns only compact aggregation', async () => {
