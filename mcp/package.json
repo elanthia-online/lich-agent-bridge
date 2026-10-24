@@ -14,7 +14,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.31.0",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "@typescript/typescript6": "^6.0.2",
     "express": "^5.2.1",
     "isolated-vm": "^7.0.1",
