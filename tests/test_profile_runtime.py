@@ -5,7 +5,8 @@ import tempfile
 import unittest
 
 from lich_agent_bridge.errors import ConfigurationError
-from lich_agent_bridge.model import OpenAICompatibleChatModel
+from lich_agent_bridge.claude_code_model import ClaudeCodeExecModel
+from lich_agent_bridge.model import AnthropicMessagesModel, OpenAICompatibleChatModel
 from lich_agent_bridge.server import (
     MAX_CUSTOM_INSTRUCTIONS_BYTES,
     custom_instructions_from_settings,
@@ -53,6 +54,54 @@ class ProfileRuntimeTests(unittest.TestCase):
         self.assertEqual(model._base_url, "http://127.0.0.1:8080/v1")
         self.assertEqual(model._reasoning_effort, "high")
         self.assertEqual(model._timeout, 13.0)
+
+    def test_claude_code_profile_builds_the_subscription_cli_adapter(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            settings = Settings.load(
+                environment={"HOME": temporary},
+                overrides={
+                    "providers": {"claude_code": {"command": "/configured/claude"}},
+                    "profiles": {"default": {
+                        "provider": "claude_code", "model": "opus",
+                        "reasoning_effort": "xhigh", "timeout_seconds": 17,
+                    }},
+                },
+            )
+            model = model_from_settings(
+                settings, environment={"ANTHROPIC_API_KEY": "unused-secret"}
+            )
+
+        self.assertIsInstance(model, ClaudeCodeExecModel)
+        self.assertEqual(model._binary, "/configured/claude")
+        self.assertEqual(model.timing_metadata, {"model": "opus", "effort": "xhigh"})
+        self.assertEqual(model.timeout_seconds, 17.0)
+        self.assertEqual(model.backend, "claude-code-cli")
+
+    def test_anthropic_profile_reads_only_its_configured_credential(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            settings = Settings.load(
+                environment={"HOME": temporary},
+                overrides={
+                    "providers": {"anthropic": {"credential_env": "PRIVATE_CLAUDE_KEY"}},
+                    "profiles": {"default": {
+                        "provider": "anthropic", "reasoning_effort": "low",
+                        "timeout_seconds": 19,
+                    }},
+                },
+            )
+            model = model_from_settings(settings, environment={
+                "PRIVATE_CLAUDE_KEY": "configured-secret",
+                "ANTHROPIC_API_KEY": "unrelated-secret",
+            })
+
+        self.assertIsInstance(model, AnthropicMessagesModel)
+        self.assertEqual(model._api_key, "configured-secret")
+        self.assertEqual(model._model, "claude-opus-5-5")
+        self.assertEqual(model._base_url, "https://api.anthropic.com")
+        self.assertEqual(model._reasoning_effort, "low")
+        self.assertEqual(model.timeout_seconds, 19.0)
+        self.assertEqual(model.backend, "anthropic-api")
+        self.assertNotIn("configured-secret", repr(settings.redacted()))
 
     def test_custom_instructions_are_loaded_from_one_bounded_regular_file(self):
         with tempfile.TemporaryDirectory() as temporary:

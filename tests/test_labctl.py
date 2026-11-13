@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -89,6 +90,27 @@ class LabctlTests(unittest.TestCase):
         self.assertIsNone(resolved.selected_profile.reasoning_effort)
         self.assertIsNone(resolved.selected_profile.instructions_file)
         self.assertFalse(any("credential value" in prompt.casefold() for prompt in prompts))
+
+    def test_setup_agent_section_selects_claude_code_and_its_cli_command(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "config.toml"
+            prompts = []
+            answers = iter(["agent", "", "claude_code", "", "max", "", "", "/opt/claude"])
+
+            def answer(prompt):
+                prompts.append(prompt)
+                return next(answers)
+
+            with patch.dict(os.environ, {"HOME": temporary}, clear=True):
+                with patch("builtins.input", side_effect=answer), patch("builtins.print"):
+                    labctl.main(["--config", str(config), "setup"])
+                resolved = Settings.load(path=config)
+
+        self.assertEqual(resolved.selected_profile.provider, "claude_code")
+        self.assertEqual(resolved.selected_profile.reasoning_effort, "max")
+        self.assertEqual(resolved.providers["claude_code"].command, "/opt/claude")
+        self.assertTrue(any(prompt.startswith("Claude Code CLI command") for prompt in prompts))
+        self.assertFalse(any("base url" in prompt.casefold() for prompt in prompts))
 
     def test_setup_storage_section_accepts_unset_optional_paths(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -334,6 +356,104 @@ class LabctlTests(unittest.TestCase):
             )
 
         self.assertEqual(result["status"], "warning")
+        self.assertIn("authentication not probed", result["detail"])
+        self.assertNotIn(credential, repr(result))
+
+    def claude_values(self, command="claude"):
+        return {
+            "selected_profile": "default",
+            "profiles": {"default": {"provider": "claude_code"}},
+            "providers": {
+                "claude_code": {
+                    "kind": "claude_code",
+                    "command": command,
+                    "base_url": None,
+                    "credential_env": None,
+                }
+            },
+        }
+
+    def test_backend_check_reports_claude_login_without_identity_or_model_call(self):
+        status = json.dumps({
+            "loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty",
+            "email": "player@example.test", "orgName": "Private Org",
+        })
+        completed = subprocess.CompletedProcess(["claude"], 0, stdout=status, stderr="")
+        with patch.object(labctl.shutil, "which", return_value="/fake/bin/claude"), \
+             patch.object(labctl, "_claude_auth_status", return_value=completed) as auth:
+            result = labctl._backend_check(
+                self.claude_values(), {"ANTHROPIC_API_KEY": "secret"}, probe=True
+            )
+            unprobed = labctl._backend_check(self.claude_values(), {}, probe=False)
+
+        auth.assert_called_once_with("/fake/bin/claude", {"ANTHROPIC_API_KEY": "secret"})
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("signed in (claude.ai)", result["detail"])
+        self.assertNotIn("player@example.test", repr(result))
+        self.assertNotIn("Private Org", repr(result))
+        self.assertEqual(unprobed, {"name": "agent_backend", "status": "ok",
+                                    "detail": "profile default: /fake/bin/claude"})
+
+    def test_backend_check_warns_when_claude_is_missing_or_signed_out(self):
+        with patch.object(labctl.shutil, "which", return_value=None):
+            missing = labctl._backend_check(self.claude_values(), {}, probe=True)
+        self.assertEqual(missing["status"], "warning")
+        self.assertIn("Claude Code CLI not found", missing["detail"])
+
+        cases = (
+            (subprocess.CompletedProcess(["claude"], 1, stdout='{"loggedIn": false}',
+                                         stderr=""), "not signed in"),
+            (subprocess.CompletedProcess(["claude"], 0, stdout="garbled", stderr=""),
+             "could not be read"),
+            (subprocess.TimeoutExpired(["claude"], 10), "timed out"),
+            (OSError("exec format error"), "could not start"),
+        )
+        for outcome, message in cases:
+            with self.subTest(message=message), \
+                 patch.object(labctl.shutil, "which", return_value="/fake/bin/claude"), \
+                 patch.object(labctl, "_claude_auth_status",
+                              **({"side_effect": outcome} if isinstance(outcome, BaseException)
+                                 else {"return_value": outcome})):
+                result = labctl._backend_check(self.claude_values(), {}, probe=True)
+            self.assertEqual(result["status"], "warning")
+            self.assertIn(message, result["detail"])
+
+    def test_claude_auth_status_runs_locally_without_api_credentials(self):
+        with patch.object(labctl.subprocess, "run") as run:
+            labctl._claude_auth_status("/fake/bin/claude", {
+                "PATH": "/usr/bin", "ANTHROPIC_API_KEY": "secret", "CLAUDECODE": "1",
+            })
+        command = run.call_args.args[0]
+        options = run.call_args.kwargs
+        self.assertEqual(command, ["/fake/bin/claude", "auth", "status", "--json"])
+        self.assertEqual(options["env"], {"PATH": "/usr/bin"})
+        self.assertEqual(options["stdin"], subprocess.DEVNULL)
+        self.assertLessEqual(options["timeout"], 10)
+
+    def test_backend_check_probes_anthropic_models_path_without_credential(self):
+        credential = "private-test-credential"
+        values = {
+            "selected_profile": "default",
+            "profiles": {"default": {"provider": "anthropic"}},
+            "providers": {
+                "anthropic": {
+                    "kind": "anthropic",
+                    "command": None,
+                    "base_url": "https://api.anthropic.com",
+                    "credential_env": "TEST_ANTHROPIC_KEY",
+                }
+            },
+        }
+        unauthorized = HTTPError(
+            "https://api.anthropic.com/v1/models", 401, "Unauthorized", {}, None
+        )
+        with patch.object(labctl, "urlopen", side_effect=unauthorized) as opener:
+            result = labctl._backend_check(
+                values, {"TEST_ANTHROPIC_KEY": credential}, probe=True
+            )
+        request = opener.call_args.args[0]
+        self.assertEqual(request.full_url, "https://api.anthropic.com/v1/models")
+        self.assertIsNone(request.get_header("X-api-key"))
         self.assertIn("authentication not probed", result["detail"])
         self.assertNotIn(credential, repr(result))
 
