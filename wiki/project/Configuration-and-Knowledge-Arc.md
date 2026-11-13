@@ -24,7 +24,10 @@ evidence contract remain authoritative over custom instructions.
 ## Model adapters
 
 - Codex CLI uses an existing local CLI installation and authentication.
-- OpenAI Responses uses explicitly configured API authentication.
+- Claude Code CLI uses an existing local CLI installation and Claude
+  subscription login, never an inherited Anthropic API key.
+- OpenAI Responses and Anthropic Messages use explicitly configured API
+  authentication.
 - The compatible Chat Completions adapter supports local servers such as
   llama.cpp without assuming they implement the Responses API.
 

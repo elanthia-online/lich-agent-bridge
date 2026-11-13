@@ -27,6 +27,7 @@ SCHEMA_VERSION = 1
 DEFAULT_PORT = 18_765
 DEFAULT_MCP_PORT = 18_766
 DEFAULT_OPENAI_MODEL = "gpt-5.6"
+DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5"
 DEFAULT_EVIDENCE_RESULT_CHARS = 12_000
 DEFAULT_EVIDENCE_TOTAL_CHARS = 36_000
 _MAX_CONFIG_BYTES = 1_048_576
@@ -36,6 +37,10 @@ _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _REASONING_EFFORTS = frozenset(
     {"none", "minimal", "low", "medium", "high", "xhigh"}
 )
+# Claude Code's `--effort` and the Messages API `output_config.effort` accept
+# the same levels.  The CLI only warns on an unknown level, so this check is the
+# gate that keeps a typo from silently running at the default effort.
+_CLAUDE_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 _TOP_LEVEL_KEYS = frozenset(
     {
         "schema_version",
@@ -109,6 +114,27 @@ class ProviderKind(StrEnum):
     CODEX = "codex"
     OPENAI = "openai"
     OPENAI_COMPATIBLE = "openai_compatible"
+    CLAUDE_CODE = "claude_code"
+    ANTHROPIC = "anthropic"
+
+
+# Provider kinds that run a local subscription CLI instead of an HTTP API.
+_CLI_PROVIDER_KINDS = frozenset({ProviderKind.CODEX, ProviderKind.CLAUDE_CODE})
+# Provider kinds that must name the environment variable holding an API key.
+_CREDENTIAL_PROVIDER_KINDS = frozenset({ProviderKind.OPENAI, ProviderKind.ANTHROPIC})
+_DEFAULT_PROFILE_MODELS = {
+    ProviderKind.OPENAI: DEFAULT_OPENAI_MODEL,
+    ProviderKind.ANTHROPIC: DEFAULT_ANTHROPIC_MODEL,
+}
+_PROVIDER_LABELS = {ProviderKind.OPENAI: "OpenAI", ProviderKind.ANTHROPIC: "Anthropic"}
+# Backends selectable with LAB_BACKEND; each is also a default provider name.
+_ENVIRONMENT_BACKENDS = ("codex", "openai", "claude_code", "anthropic")
+
+
+def _reasoning_efforts(kind: ProviderKind) -> frozenset[str]:
+    if kind in {ProviderKind.CLAUDE_CODE, ProviderKind.ANTHROPIC}:
+        return _CLAUDE_REASONING_EFFORTS
+    return _REASONING_EFFORTS
 
 
 class OnlineFallbackPolicy(StrEnum):
@@ -501,6 +527,18 @@ def _default_mapping(*, environment: Mapping[str, str]) -> dict[str, Any]:
                 "base_url": "http://127.0.0.1:8080/v1",
                 "credential_env": None,
             },
+            "claude_code": {
+                "kind": ProviderKind.CLAUDE_CODE.value,
+                "command": "claude",
+                "base_url": None,
+                "credential_env": None,
+            },
+            "anthropic": {
+                "kind": ProviderKind.ANTHROPIC.value,
+                "command": None,
+                "base_url": "https://api.anthropic.com",
+                "credential_env": "ANTHROPIC_API_KEY",
+            },
         },
         "profiles": {
             "default": {
@@ -625,15 +663,18 @@ def _environment_overrides(
     )
     backend = environment.get("LAB_BACKEND", "").strip().casefold()
     if backend:
-        if backend not in {"codex", "openai"}:
-            raise ConfigurationError("LAB_BACKEND must be 'codex' or 'openai'")
+        if backend not in _ENVIRONMENT_BACKENDS:
+            allowed = ", ".join(f"'{name}'" for name in _ENVIRONMENT_BACKENDS)
+            raise ConfigurationError(f"LAB_BACKEND must be one of: {allowed}")
         _set_nested(result, ("profiles", selected, "provider"), backend)
     else:
         backend = str(current_profile.get("provider", "codex")).casefold()
 
     if backend == "codex":
         set_if("LAB_CODEX_MODEL", "profiles", selected, "model")
-    elif backend == "openai":
+    elif backend == "claude_code":
+        set_if("LAB_CLAUDE_MODEL", "profiles", selected, "model")
+    elif backend in {"openai", "anthropic"}:
         set_if("LAB_MODEL", "profiles", selected, "model")
     set_if("LAB_REASONING_EFFORT", "profiles", selected, "reasoning_effort")
     set_path("LAB_INSTRUCTIONS_FILE", "profiles", selected, "instructions_file")
@@ -644,17 +685,21 @@ def _environment_overrides(
         "web_search",
         convert=lambda value: _environment_bool("LAB_WEB_SEARCH", value),
     )
-    set_if(
-        "LAB_CODEX_BIN",
-        "providers",
-        "codex",
-        "command",
-        convert=lambda value: (
-            str(_expand_path(value, base=Path.cwd(), home=home))
-            if value.startswith("~") or "/" in value
-            else value
-        ),
-    )
+    for variable, provider_name in (
+        ("LAB_CODEX_BIN", "codex"),
+        ("LAB_CLAUDE_BIN", "claude_code"),
+    ):
+        set_if(
+            variable,
+            "providers",
+            provider_name,
+            "command",
+            convert=lambda value: (
+                str(_expand_path(value, base=Path.cwd(), home=home))
+                if value.startswith("~") or "/" in value
+                else value
+            ),
+        )
     return result
 
 
@@ -879,14 +924,14 @@ def _build_settings(
             raise ConfigurationError(
                 f"providers.{name}.credential_env must be an environment variable name"
             )
-        if kind is ProviderKind.CODEX:
+        if kind in _CLI_PROVIDER_KINDS:
             if command is None:
                 raise ConfigurationError(
-                    f"providers.{name}.command is required for a codex provider"
+                    f"providers.{name}.command is required for a {kind.value} provider"
                 )
             if base_url is not None or credential_env is not None:
                 raise ConfigurationError(
-                    f"providers.{name} is codex and cannot set base_url or credential_env"
+                    f"providers.{name} is {kind.value} and cannot set base_url or credential_env"
                 )
             if command.startswith("~") or "/" in command:
                 command = str(_expand_path(command, base=base, home=home))
@@ -900,10 +945,21 @@ def _build_settings(
                     f"providers.{name}.base_url is required for an HTTP provider"
                 )
             _validate_url(base_url, f"providers.{name}.base_url")
-            if kind is ProviderKind.OPENAI and credential_env is None:
+            if kind in _CREDENTIAL_PROVIDER_KINDS and credential_env is None:
                 raise ConfigurationError(
-                    f"providers.{name}.credential_env is required for an OpenAI provider"
+                    f"providers.{name}.credential_env is required for an "
+                    f"{_PROVIDER_LABELS[kind]} provider"
                 )
+            if kind is ProviderKind.ANTHROPIC:
+                parsed_provider_url = urlsplit(base_url)
+                if not (
+                    parsed_provider_url.scheme == "https"
+                    or _is_loopback_host(parsed_provider_url.hostname or "")
+                ):
+                    raise ConfigurationError(
+                        f"providers.{name}.base_url must use HTTPS unless its "
+                        "HTTP host is loopback"
+                    )
         providers[name] = ProviderSettings(
             kind=kind,
             command=command,
@@ -934,10 +990,12 @@ def _build_settings(
         )
         if effort is not None:
             effort = effort.casefold()
-            if effort not in _REASONING_EFFORTS:
-                allowed = ", ".join(sorted(_REASONING_EFFORTS))
+            efforts = _reasoning_efforts(providers[provider].kind)
+            if effort not in efforts:
+                allowed = ", ".join(sorted(efforts))
                 raise ConfigurationError(
-                    f"profiles.{name}.reasoning_effort must be one of: {allowed}"
+                    f"profiles.{name}.reasoning_effort must be one of: {allowed} "
+                    f"for a {providers[provider].kind.value} provider"
                 )
         timeout = _number(
             profile_raw.get("timeout_seconds"),
@@ -975,8 +1033,8 @@ def _build_settings(
                 f"profiles.{name}.evidence_total_chars must be at least "
                 "evidence_result_chars + 2400 and at most 300000"
             )
-        if providers[provider].kind is ProviderKind.OPENAI and model is None:
-            model = DEFAULT_OPENAI_MODEL
+        if model is None:
+            model = _DEFAULT_PROFILE_MODELS.get(providers[provider].kind)
         if (
             providers[provider].kind is ProviderKind.OPENAI_COMPATIBLE
             and model is None
