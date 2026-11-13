@@ -18,9 +18,22 @@ labctl doctor
 ```
 
 Set up the selected model backend independently. The default Codex CLI backend
-uses the existing CLI login. API backends read credentials from the configured
-environment-variable name. Local compatible servers require their own running
-model endpoint.
+uses the existing CLI login (`codex login`). The Claude Code CLI backend
+(`claude_code` provider) uses the existing Claude subscription login
+(`claude auth login`); LAB strips `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`
+from its child process so the subscription, not API billing, is used, and
+`labctl doctor` checks the login with `claude auth status` without a model
+request. API backends (`openai`, `anthropic`) read credentials from the
+configured environment-variable name. Local compatible servers require their
+own running model endpoint.
+
+| Provider | Kind | Authentication | Effort values |
+|---|---|---|---|
+| `codex` (default) | Codex CLI | Codex ChatGPT login | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` |
+| `claude_code` | Claude Code CLI | Claude subscription login | `low`, `medium`, `high`, `xhigh`, `max` |
+| `openai` | OpenAI Responses API | `OPENAI_API_KEY` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` |
+| `anthropic` | Anthropic Messages API | `ANTHROPIC_API_KEY` | `low`, `medium`, `high`, `xhigh`, `max` |
+| `llama_cpp` | OpenAI-compatible Chat Completions | optional | server-defined |
 
 The default settings file is
 `~/.config/lich-agent-bridge/config.toml`; runtime state is under
