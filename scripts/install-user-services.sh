@@ -52,7 +52,7 @@ mkdir -p -- "${service_dir}"
 chmod 700 -- "${service_dir}"
 
 runtime_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-for runtime_command in python3 node npm codex; do
+for runtime_command in python3 node npm codex claude; do
   if resolved_command="$(command -v "${runtime_command}" 2>/dev/null)" && [[ "${resolved_command}" == /* ]]; then
     command_directory="${resolved_command%/*}"
     case ":${runtime_path}:" in

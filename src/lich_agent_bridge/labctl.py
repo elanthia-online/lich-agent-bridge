@@ -11,12 +11,15 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import subprocess
 import sys
+import tempfile
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
+from .claude_code_model import child_environment
 from .errors import ConfigurationError, ValidationError
 from .controller_manifest import CONTROLLER_CONTROLS
 from .gswiki import DEFAULT_NAMESPACES, sync
@@ -28,6 +31,11 @@ from .world_state import MAX_WATCH_TIMEOUT_SECONDS
 
 
 MAX_DOCTOR_RESPONSE_BYTES = 1_048_576
+CLAUDE_AUTH_STATUS_TIMEOUT_SECONDS = 10.0
+_CLI_PROVIDER_LABELS = {
+    ProviderKind.CODEX.value: "Codex",
+    ProviderKind.CLAUDE_CODE.value: "Claude Code",
+}
 
 
 def parser() -> argparse.ArgumentParser:
@@ -381,9 +389,10 @@ def _setup(path: Path) -> None:
         provider_name = profile["provider"]
         if provider_name in values["providers"]:
             provider = values["providers"][provider_name]
-            if provider["kind"] == ProviderKind.CODEX.value:
+            cli_label = _CLI_PROVIDER_LABELS.get(provider["kind"])
+            if cli_label is not None:
                 provider["command"] = _prompt(
-                    "Codex CLI command", provider["command"]
+                    f"{cli_label} CLI command", provider["command"]
                 )
             else:
                 provider["base_url"] = _prompt(
@@ -667,14 +676,19 @@ def _backend_check(
     provider_name = profile["provider"]
     providers = values["providers"]
     provider = providers[provider_name]
-    if provider["kind"] == ProviderKind.CODEX.value:
+    cli_label = _CLI_PROVIDER_LABELS.get(provider["kind"])
+    if cli_label is not None:
         binary = provider["command"]
         resolved = shutil.which(binary) if binary else None
-        if resolved:
-            return _check("agent_backend", "ok", f"profile {selected}: {resolved}")
-        return _check(
-            "agent_backend", "warning", f"profile {selected}: Codex CLI not found"
-        )
+        if not resolved:
+            return _check(
+                "agent_backend",
+                "warning",
+                f"profile {selected}: {cli_label} CLI not found",
+            )
+        if probe and provider["kind"] == ProviderKind.CLAUDE_CODE.value:
+            return _claude_login_check(selected, resolved, environment)
+        return _check("agent_backend", "ok", f"profile {selected}: {resolved}")
     key_name = provider.get("credential_env", "")
     if key_name and not environment.get(key_name):
         return _check(
@@ -684,8 +698,13 @@ def _backend_check(
         )
     if probe:
         base_url = provider["base_url"]
+        models_path = (
+            "/v1/models"
+            if provider["kind"] == ProviderKind.ANTHROPIC.value
+            else "/models"
+        )
         request = Request(
-            f"{base_url}/models",
+            f"{base_url}{models_path}",
             method="GET",
             headers={"Accept": "application/json"},
         )
@@ -733,6 +752,71 @@ def _backend_check(
                 f"profile {selected}: endpoint returned an invalid response",
             )
     return _check("agent_backend", "ok", f"profile {selected}: {provider_name}")
+
+
+def _claude_auth_status(binary: str, environment: dict[str, str]) -> subprocess.CompletedProcess:
+    """Read local Claude Code login state; this makes no model request."""
+
+    with tempfile.TemporaryDirectory(prefix="lich-agent-bridge-claude-doctor-") as runtime:
+        return subprocess.run(
+            [binary, "auth", "status", "--json"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=CLAUDE_AUTH_STATUS_TIMEOUT_SECONDS,
+            cwd=runtime,
+            env=child_environment(environment),
+            check=False,
+        )
+
+
+def _claude_login_check(
+    selected: str, binary: str, environment: dict[str, str]
+) -> dict[str, str]:
+    # Only the login flag and method are reported; the status also carries
+    # account identity (email, organization) that doctor output must not show.
+    try:
+        result = _claude_auth_status(binary, environment)
+    except subprocess.TimeoutExpired:
+        return _check(
+            "agent_backend",
+            "warning",
+            f"profile {selected}: {binary}; `claude auth status` timed out",
+        )
+    except OSError as error:
+        return _check(
+            "agent_backend",
+            "warning",
+            f"profile {selected}: {binary} could not start: {error}",
+        )
+    try:
+        body = json.loads(result.stdout or "")
+    except json.JSONDecodeError:
+        body = None
+    if not isinstance(body, dict):
+        return _check(
+            "agent_backend",
+            "warning",
+            f"profile {selected}: {binary}; login status could not be read",
+        )
+    if body.get("loggedIn") is not True:
+        return _check(
+            "agent_backend",
+            "warning",
+            f"profile {selected}: {binary}; not signed in "
+            "(run `claude auth login`)",
+        )
+    method = body.get("authMethod")
+    method_text = (
+        f" ({method})"
+        if isinstance(method, str) and method.replace(".", "").replace("_", "").isalnum()
+        else ""
+    )
+    return _check(
+        "agent_backend",
+        "ok",
+        f"profile {selected}: {binary}; signed in{method_text}",
+    )
 
 
 def _setup_checks(settings: Settings) -> list[dict[str, str]]:

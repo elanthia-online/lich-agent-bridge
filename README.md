@@ -52,7 +52,7 @@ empty controller registry, older Lich builds can still run explicit inventory
 refreshes using initial ownership checks; native per-command guards are used
 whenever available. See [inventory compatibility](wiki/project/Setup-and-Operations.md#install-lich-dependencies).
 
-The current default backend is the locally installed Codex CLI using its existing ChatGPT login. A direct OpenAI Responses API adapter and an OpenAI-compatible Chat Completions adapter for local servers such as llama.cpp are also available. Named profiles select the provider, model, reasoning effort, timeout, and an optional bounded local instructions file.
+The current default backend is the locally installed Codex CLI using its existing ChatGPT login. The locally installed Claude Code CLI can be selected the same way, using its existing Claude subscription login. Direct OpenAI Responses and Anthropic Messages API adapters, and an OpenAI-compatible Chat Completions adapter for local servers such as llama.cpp, are also available. Named profiles select the provider, model, reasoning effort, timeout, and an optional bounded local instructions file.
 
 Current development and live testing are Linux-oriented. The optional MCP adapter additionally requires Node.js, npm, and the native build prerequisites used by `isolated-vm`.
 
@@ -76,6 +76,22 @@ labctl setup
 labctl config show
 ./scripts/run-sidecar.sh
 ```
+
+For the Claude Code backend, sign in once and select the `claude_code`
+provider (in `labctl setup`, or with `LAB_BACKEND=claude_code`):
+
+```bash
+claude auth login
+LAB_BACKEND=claude_code labctl doctor
+LAB_BACKEND=claude_code ./scripts/run-sidecar.sh
+```
+
+LAB runs each question as one tool-free, unpersisted `claude --print` turn in
+a fresh temporary directory, with user/project settings, MCP servers, hooks,
+plugins, and `CLAUDE.md` loading disabled. It removes `ANTHROPIC_API_KEY` and
+`ANTHROPIC_AUTH_TOKEN` from the child environment so the CLI uses the signed-in
+subscription rather than API billing. `labctl doctor` reports whether the CLI
+is signed in using `claude auth status`, which makes no model request.
 
 `labctl setup` writes the validated configuration to
 `~/.config/lich-agent-bridge/config.toml` by default. It is safe to rerun: an
@@ -311,10 +327,11 @@ The default endpoints are:
 - SessionHub: `http://127.0.0.1:18765`
 - MCP: `http://127.0.0.1:18766/mcp`
 
-Register it with Codex:
+Register it with Codex or Claude Code:
 
 ```bash
 codex mcp add lab --url http://127.0.0.1:18766/mcp
+claude mcp add --transport http lab http://127.0.0.1:18766/mcp
 ```
 
 Restart the client after changing MCP registration. The MCP server remains loopback-only and obtains its SessionHub credential from LAB's private state directory; the credential is not exposed as a tool argument.
@@ -335,10 +352,17 @@ overrides. Common overrides are:
 - `LAB_CONFIG` — select a settings file instead of the XDG default.
 - `LAB_HOST`, `LAB_PORT`, and `LAB_MCP_PORT` — loopback service endpoints;
   SessionHub defaults to port `18765` and MCP to `18766`.
-- `LAB_BACKEND` — `codex` by default or `openai`.
-- `LAB_CODEX_MODEL` — optional Codex model override.
+- `LAB_BACKEND` — `codex` by default, `claude_code`, `openai`, or `anthropic`.
+- `LAB_CODEX_BIN` and `LAB_CODEX_MODEL` — optional Codex CLI path and model overrides.
+- `LAB_CLAUDE_BIN` and `LAB_CLAUDE_MODEL` — optional Claude Code CLI path and
+  model overrides (a model alias such as `sonnet` or a full model name).
 - `OPENAI_API_KEY` — required only for the direct OpenAI backend.
-- `LAB_MODEL` — optional model override for the direct OpenAI backend.
+- `ANTHROPIC_API_KEY` — required only for the direct Anthropic backend; it is
+  never passed to the Claude Code CLI backend.
+- `LAB_MODEL` — optional model override for the direct OpenAI or Anthropic backend.
+- `LAB_REASONING_EFFORT` — optional effort for the selected profile. Codex and
+  OpenAI accept `none`, `minimal`, `low`, `medium`, `high`, or `xhigh`; Claude
+  Code and Anthropic accept `low`, `medium`, `high`, `xhigh`, or `max`.
 - `LAB_GSWIKI_DB` — optional path to a local GSWiki SQLite mirror.
 - `LAB_WIKI_ROOT` — optional path to the curated Markdown wiki.
 - `LAB_ACTION_TOKEN_FILE` — optional private token-file override.
@@ -351,8 +375,8 @@ Persistent runtime state defaults to `~/.local/state/lich-agent-bridge/`. Genera
 
 A unified settings file, guided `labctl setup`, redacted inspection, and local
 `labctl doctor` diagnostics are implemented. The selected profile now drives
-the Codex CLI, OpenAI Responses, or an OpenAI-compatible Chat Completions
-adapter; the latter is suitable for llama.cpp-style local servers and does not
+the Codex CLI, the Claude Code CLI, OpenAI Responses, Anthropic Messages, or an
+OpenAI-compatible Chat Completions adapter; the latter is suitable for llama.cpp-style local servers and does not
 assume that they implement the Responses endpoint. Custom instructions are
 read from one bounded UTF-8 regular file and are appended beneath LAB's
 non-overridable safety and evidence-tool instructions.

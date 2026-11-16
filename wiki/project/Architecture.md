@@ -62,7 +62,8 @@ until it actually exits, preventing orphan work from bypassing the bound.
 
 The answer model may answer immediately or request only the advertised
 [evidence tools](Evidence-Gathering-Arc.md). A provider-neutral protocol applies
-to Codex CLI, OpenAI Responses, and compatible local-model adapters.
+to Codex CLI, Claude Code CLI, OpenAI Responses, Anthropic Messages, and
+compatible local-model adapters.
 
 Forget and session replacement invalidate pending answers and temporary
 dialogue. Synchronous cancellation revokes only the question's owned pending

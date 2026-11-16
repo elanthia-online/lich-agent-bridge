@@ -9,7 +9,8 @@ interfaces, not a guarantee about any user's installation or live character.
 - Structured world snapshots, event watches, and provenance-aware context.
 - Private comma-prefixed questions and bounded temporary dialogue.
 - Validated TOML configuration, guided setup, named model profiles, and doctor.
-- Codex CLI, OpenAI Responses, and compatible Chat Completions model adapters.
+- Codex CLI, Claude Code CLI, OpenAI Responses, Anthropic Messages, and
+  compatible Chat Completions model adapters.
 - Optional local Markdown, GSWiki mirror, live GSWiki, and opt-in web fallback.
 - Private inventory/item dossiers and timestamped character observations.
 - A bounded evidence loop with fixed INFO/SKILLS recon behind existing gates.

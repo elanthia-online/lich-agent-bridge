@@ -2,6 +2,16 @@
 
 This package is a loopback-only Streamable HTTP MCP adapter over Python `SessionHub`. It contains no game logic and cannot access Lich, files, terminals, raw sockets, or the network from agent-supplied code. All state, capability admission, policy, and verified outcomes remain owned by `SessionHub`.
 
+## Registering with a client
+
+With the adapter running on its default port, register it with Codex or
+Claude Code:
+
+```bash
+codex mcp add lab --url http://127.0.0.1:18766/mcp
+claude mcp add --transport http lab http://127.0.0.1:18766/mcp
+```
+
 ## Configuration
 
 - `LAB_SESSION_HUB_URL` — loopback HTTP URL, default `http://127.0.0.1:18765`

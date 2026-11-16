@@ -646,6 +646,153 @@ inventory_database = "configured.sqlite3"
         self.assertIn("JEV_API_KEY", rendered)
         self.assertNotIn("api_key", settings.providers["openai"].__slots__)
 
+    def test_claude_backends_are_default_providers_selectable_by_environment(self) -> None:
+        defaults = Settings.load(self.config, environment=self.environment)
+        self.assertEqual(defaults.selected_profile.provider, "codex")
+        claude = defaults.providers["claude_code"]
+        self.assertEqual(claude.kind, ProviderKind.CLAUDE_CODE)
+        self.assertEqual(claude.command, "claude")
+        self.assertIsNone(claude.base_url)
+        self.assertIsNone(claude.credential_env)
+        anthropic = defaults.providers["anthropic"]
+        self.assertEqual(anthropic.kind, ProviderKind.ANTHROPIC)
+        self.assertEqual(anthropic.base_url, "https://api.anthropic.com")
+        self.assertEqual(anthropic.credential_env, "ANTHROPIC_API_KEY")
+
+        cli = Settings.load(self.config, environment={
+            **self.environment,
+            "LAB_BACKEND": "claude_code",
+            "LAB_CLAUDE_MODEL": "sonnet",
+            "LAB_CLAUDE_BIN": "~/bin/claude",
+            "LAB_CODEX_MODEL": "ignored-for-claude",
+            "LAB_MODEL": "ignored-for-claude",
+            "LAB_REASONING_EFFORT": "max",
+        })
+        self.assertEqual(cli.selected_profile.provider, "claude_code")
+        self.assertEqual(cli.selected_profile.model, "sonnet")
+        self.assertEqual(cli.selected_profile.reasoning_effort, "max")
+        self.assertEqual(cli.providers["claude_code"].command, str(self.home / "bin/claude"))
+        self.assertEqual(cli.providers["codex"].command, "codex")
+
+        api = Settings.load(self.config, environment={
+            **self.environment, "LAB_BACKEND": "anthropic",
+        })
+        self.assertEqual(api.selected_profile.provider, "anthropic")
+        self.assertEqual(api.selected_profile.model, "claude-opus-5-5")
+        api_model = Settings.load(self.config, environment={
+            **self.environment, "LAB_BACKEND": "Anthropic", "LAB_MODEL": "claude-sonnet-5-5",
+            "LAB_CLAUDE_MODEL": "ignored-for-api",
+        })
+        self.assertEqual(api_model.selected_profile.model, "claude-sonnet-5-5")
+
+        with self.assertRaisesRegex(ConfigurationError, "LAB_BACKEND must be one of"):
+            Settings.load(self.config, environment={
+                **self.environment, "LAB_BACKEND": "claude",
+            })
+
+    def test_reasoning_effort_is_validated_per_provider_kind(self) -> None:
+        accepted = {
+            "codex": ("none", "minimal", "low", "medium", "high", "xhigh"),
+            "openai": ("none", "minimal", "low", "medium", "high", "xhigh"),
+            "claude_code": ("low", "medium", "high", "xhigh", "max"),
+            "anthropic": ("low", "medium", "high", "xhigh", "max"),
+        }
+        rejected = {
+            "codex": ("max",),
+            "openai": ("max",),
+            "claude_code": ("none", "minimal", "extreme"),
+            "anthropic": ("none", "minimal", "extreme"),
+        }
+        for provider, efforts in accepted.items():
+            for effort in efforts:
+                with self.subTest(provider=provider, effort=effort):
+                    settings = Settings.load(self.config, environment=self.environment,
+                                             overrides={"profiles": {"default": {
+                                                 "provider": provider,
+                                                 "reasoning_effort": effort.upper(),
+                                             }}})
+                    self.assertEqual(settings.selected_profile.reasoning_effort, effort)
+        for provider, efforts in rejected.items():
+            for effort in efforts:
+                with self.subTest(provider=provider, effort=effort), self.assertRaisesRegex(
+                    ConfigurationError,
+                    rf"reasoning_effort must be one of: .* for a {provider} provider",
+                ):
+                    Settings.load(self.config, environment=self.environment,
+                                  overrides={"profiles": {"default": {
+                                      "provider": provider, "reasoning_effort": effort,
+                                  }}})
+
+    def test_claude_provider_shapes_follow_cli_and_api_rules(self) -> None:
+        cases = (
+            ({"kind": "claude_code", "command": None}, "command is required for a claude_code"),
+            ({"kind": "claude_code", "command": "claude", "base_url": "https://x.test"},
+             "is claude_code and cannot set base_url"),
+            ({"kind": "claude_code", "command": "claude", "credential_env": "KEY"},
+             "is claude_code and cannot set base_url or credential_env"),
+            ({"kind": "anthropic", "command": "claude", "base_url": "https://x.test",
+              "credential_env": "KEY"}, "HTTP-based and cannot set command"),
+            ({"kind": "anthropic", "base_url": None, "credential_env": "KEY"},
+             "base_url is required"),
+            ({"kind": "anthropic", "base_url": "https://x.test", "credential_env": None},
+             "credential_env is required for an Anthropic provider"),
+            ({"kind": "anthropic", "base_url": "http://api.example.test",
+              "credential_env": "KEY"}, "must use HTTPS unless its HTTP host is loopback"),
+        )
+        for provider, message in cases:
+            with self.subTest(provider=provider), self.assertRaisesRegex(
+                ConfigurationError, message
+            ):
+                Settings.load(self.config, environment=self.environment, overrides={
+                    "providers": {"custom": {"command": None, "base_url": None,
+                                             "credential_env": None, **provider}},
+                })
+        local = Settings.load(self.config, environment=self.environment, overrides={
+            "providers": {"proxy": {"kind": "anthropic", "command": None,
+                                    "base_url": "http://127.0.0.1:8787/",
+                                    "credential_env": "LOCAL_KEY"}},
+            "profiles": {"default": {"provider": "proxy"}},
+        })
+        self.assertEqual(local.providers["proxy"].base_url, "http://127.0.0.1:8787")
+        self.assertEqual(local.selected_profile.model, "claude-opus-5-5")
+
+    def test_existing_config_file_without_claude_providers_still_loads(self) -> None:
+        self.write_config(
+            """
+schema_version = 1
+selected_profile = "default"
+
+[providers.codex]
+kind = "codex"
+command = "codex"
+
+[profiles.default]
+provider = "codex"
+reasoning_effort = "xhigh"
+timeout_seconds = 90.0
+web_search = false
+""".lstrip()
+        )
+        settings = Settings.load(self.config, environment=self.environment)
+        self.assertEqual(settings.selected_profile.provider, "codex")
+        self.assertEqual(settings.selected_profile.reasoning_effort, "xhigh")
+        self.assertIn("claude_code", settings.providers)
+        settings.write(replace=True)
+        restored = Settings.load(self.config, environment=self.environment)
+        self.assertEqual(restored.to_mapping(), settings.to_mapping())
+
+    def test_redacted_rendering_never_contains_anthropic_credentials(self) -> None:
+        secret = "anthropic-secret-that-must-not-leak"
+        settings = Settings.load(self.config, environment={
+            **self.environment,
+            "LAB_BACKEND": "anthropic",
+            "ANTHROPIC_API_KEY": secret,
+            "ANTHROPIC_AUTH_TOKEN": secret,
+        })
+        rendered = repr(settings.redacted())
+        self.assertNotIn(secret, rendered)
+        self.assertIn("ANTHROPIC_API_KEY", rendered)
+
     def test_atomic_write_round_trips_and_refuses_unconfirmed_replacement(self) -> None:
         settings = Settings.load(self.config, environment=self.environment)
 

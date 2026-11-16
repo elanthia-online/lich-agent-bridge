@@ -7,16 +7,22 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
+from lich_agent_bridge.claude_code_model import ClaudeCodeExecModel
 from lich_agent_bridge.codex_model import CodexExecModel
 from lich_agent_bridge.errors import ModelError, ValidationError
 from lich_agent_bridge.evidence_loop import EvidenceLoop
-from lich_agent_bridge.model import OpenAICompatibleChatModel, OpenAIResponsesModel
+from lich_agent_bridge.model import (
+    AnthropicMessagesModel,
+    OpenAICompatibleChatModel,
+    OpenAIResponsesModel,
+)
 from lich_agent_bridge.question import QuestionControl
 
 
 REQUEST = json.dumps({"requests": [{"tool": "state.read", "arguments": {"sections": ["vitals"]}}]})
 ANSWER = json.dumps({"answer": "Your observed spirit is 11."})
 SOURCE = {"source": "live_state", "observed_at": "2026-09-06T12:00:00Z"}
+BACKENDS = ("codex", "claude", "responses", "chat", "anthropic")
 
 
 class Response(io.BytesIO):
@@ -41,6 +47,11 @@ class Wire:
         turn = next(self.turns)
         if isinstance(turn, dict):
             body = turn  # Explicit malformed/native-tool-only provider fixture.
+        elif self.backend == "anthropic":
+            body = {"content": [
+                {"type": "thinking", "thinking": "", "signature": "synthetic"},
+                {"type": "text", "text": turn},
+            ], "stop_reason": "end_turn"}
         elif self.backend == "responses":
             body = {"output": [
                 {"type": "reasoning", "summary": []},
@@ -53,6 +64,17 @@ class Wire:
     def run(self, command, **options):
         self.calls.append({"command": command, **options})
         turn = next(self.turns)
+        if self.backend == "claude":
+            # The private system prompt file only exists during the call.
+            system_path = Path(command[command.index("--system-prompt-file") + 1])
+            self.calls[-1]["system"] = system_path.read_text(encoding="utf-8")
+            if turn is None:
+                # Tool-looking stream output, but no final result object.
+                stdout = '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}'
+            else:
+                stdout = json.dumps({"type": "result", "subtype": "success",
+                                     "is_error": False, "result": turn})
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
         if turn is not None:
             destination = Path(command[command.index("--output-last-message") + 1])
             destination.write_text(turn, encoding="utf-8")
@@ -61,16 +83,22 @@ class Wire:
 
     def prompt(self, index):
         call = self.calls[index]
-        if self.backend == "codex":
+        if self.backend in {"codex", "claude"}:
             return call["input"]
         payload = call["payload"]
+        if self.backend == "anthropic":
+            return payload["messages"][0]["content"]
         return payload["input"] if self.backend == "responses" else payload["messages"][1]["content"]
 
     def instructions(self, index):
         call = self.calls[index]
         if self.backend == "codex":
             return call["input"]
+        if self.backend == "claude":
+            return call["system"]
         payload = call["payload"]
+        if self.backend == "anthropic":
+            return payload["system"]
         return payload["instructions"] if self.backend == "responses" else payload["messages"][0]["content"]
 
 
@@ -100,6 +128,12 @@ class EvidenceAdaptersTests(unittest.TestCase):
         wire = Wire(backend, turns)
         if backend == "codex":
             model = CodexExecModel(binary="/fake/codex", timeout=30, runner=wire.run)
+        elif backend == "claude":
+            model = ClaudeCodeExecModel(binary="/fake/claude", timeout=30, runner=wire.run)
+        elif backend == "anthropic":
+            model = AnthropicMessagesModel(api_key="fake-test-key", model="fixture-model",
+                                           base_url="https://never-contact.invalid", timeout=30,
+                                           opener=wire.open)
         elif backend == "responses":
             model = OpenAIResponsesModel(api_key="fake-test-key", model="fixture-model",
                                          base_url="https://never-contact.invalid/v1", timeout=30, opener=wire.open)
@@ -115,7 +149,7 @@ class EvidenceAdaptersTests(unittest.TestCase):
                                       input_text="How is my spirit doing?", control=QuestionControl(8), session=session)
 
     def test_request_and_answer_json_survive_every_adapter_without_native_tools(self):
-        for backend in ("codex", "responses", "chat"):
+        for backend in BACKENDS:
             with self.subTest(backend=backend):
                 model, wire = self.make_model(backend, (REQUEST, ANSWER))
                 session = Session()
@@ -144,6 +178,20 @@ class EvidenceAdaptersTests(unittest.TestCase):
                         self.assertIn("not permission to use native tools", call["input"])
                         self.assertNotIn("OPENAI_API_KEY", call["env"])
                         self.assertFalse(call.get("shell", False))
+                    elif backend == "claude":
+                        command = call["command"]
+                        self.assertEqual(command[command.index("--tools") + 1], "")
+                        self.assertEqual(command[command.index("--setting-sources") + 1], "")
+                        self.assertTrue({"--print", "--strict-mcp-config", "--safe-mode",
+                                         "--no-session-persistence"} <= set(command))
+                        self.assertNotIn("--bare", command)
+                        self.assertIn("not permission to use native tools", call["system"])
+                        self.assertNotIn("not permission to use native tools", call["input"])
+                        self.assertNotIn("ANTHROPIC_API_KEY", call["env"])
+                        self.assertFalse(call.get("shell", False))
+                    elif backend == "anthropic":
+                        self.assertNotIn("tools", call["payload"])
+                        self.assertEqual([m["role"] for m in call["payload"]["messages"]], ["user"])
                     else:
                         self.assertNotIn("tools", call["payload"])
                         self.assertNotIn("functions", call["payload"])
@@ -152,13 +200,13 @@ class EvidenceAdaptersTests(unittest.TestCase):
                             self.assertNotIn("previous_response_id", call["payload"])
                         else:
                             self.assertEqual([m["role"] for m in call["payload"]["messages"]], ["system", "user"])
-                if backend == "codex":
+                if backend in {"codex", "claude"}:
                     self.assertNotEqual(wire.calls[0]["cwd"], wire.calls[1]["cwd"])
                     self.assertFalse(Path(wire.calls[0]["cwd"]).exists())
                     self.assertFalse(Path(wire.calls[1]["cwd"]).exists())
 
     def test_direct_plain_answers_remain_single_call_across_adapters(self):
-        for backend in ("codex", "responses", "chat"):
+        for backend in BACKENDS:
             with self.subTest(backend=backend):
                 model, wire = self.make_model(backend, ("Hello, Testmage!",))
                 session = Session()
@@ -168,7 +216,7 @@ class EvidenceAdaptersTests(unittest.TestCase):
                 self.assertEqual(session.calls, [])
 
     def test_malformed_protocol_is_rejected_after_each_adapter_without_execution(self):
-        for backend in ("codex", "responses", "chat"):
+        for backend in BACKENDS:
             with self.subTest(backend=backend):
                 model, wire = self.make_model(backend, ('{"requests":[',))
                 session = Session()
@@ -183,6 +231,9 @@ class EvidenceAdaptersTests(unittest.TestCase):
             "chat": {"choices": [{"message": {"content": None, "tool_calls": [
                 {"type": "function", "function": {"name": "state.read", "arguments": "{}"}}]}}]},
             "codex": None,  # Tool-looking stdout, but no final-message file.
+            "claude": None,  # Tool-looking stdout, but no final result object.
+            "anthropic": {"content": [{"type": "tool_use", "id": "toolu_x", "name": "state.read",
+                                       "input": {}}], "stop_reason": "tool_use"},
         }
         for backend, reply in replies.items():
             with self.subTest(backend=backend):

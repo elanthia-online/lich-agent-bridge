@@ -26,6 +26,7 @@ from .actions import (
     JsonlAuditLog,
     load_or_create_action_token,
 )
+from .claude_code_model import ClaudeCodeExecModel
 from .codex_model import CodexExecModel
 from .context_assembler import ContextAssembler
 from .controller_manifest import ControllerManifest
@@ -37,7 +38,12 @@ from .character_knowledge import CharacterKnowledge
 from .evidence_tools import EvidenceTools
 from .evidence_loop import EvidenceLoop
 from .knowledge import KnowledgeBase
-from .model import OpenAICompatibleChatModel, OpenAIResponsesModel
+from .model import (
+    DEFAULT_ANTHROPIC_BASE_URL,
+    AnthropicMessagesModel,
+    OpenAICompatibleChatModel,
+    OpenAIResponsesModel,
+)
 from .protocol import (
     AskRequest,
     CharacterRequest,
@@ -453,6 +459,27 @@ def model_from_settings(
         return CodexExecModel(
             binary=provider.command,
             model=profile.model,
+            reasoning_effort=profile.reasoning_effort,
+            timeout=profile.timeout_seconds,
+        )
+    if provider.kind is ProviderKind.CLAUDE_CODE:
+        return ClaudeCodeExecModel(
+            binary=provider.command,
+            model=profile.model,
+            reasoning_effort=profile.reasoning_effort,
+            timeout=profile.timeout_seconds,
+        )
+    if provider.kind is ProviderKind.ANTHROPIC:
+        env = os.environ if environment is None else environment
+        credential = (
+            env.get(provider.credential_env, "")
+            if provider.credential_env is not None
+            else ""
+        )
+        return AnthropicMessagesModel(
+            api_key=credential,
+            model=profile.model,
+            base_url=provider.base_url or DEFAULT_ANTHROPIC_BASE_URL,
             reasoning_effort=profile.reasoning_effort,
             timeout=profile.timeout_seconds,
         )
